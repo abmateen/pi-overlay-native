@@ -476,7 +476,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             let chunk = rawText
             var sentOk = true
             if mode == .tty, let inj = injector {
-                let raw = chunk + "\n"
+                let raw = chunk + "\r"
                 sentOk = inj.inject(raw)
             } else if mode == .terminal, let inj = terminalInjector {
                 sentOk = inj.sendTerminalScript(chunk)
