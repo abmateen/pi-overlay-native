@@ -98,8 +98,9 @@ export PI_OVERLAY_BIN=/absolute/path/to/pi-overlay-extension/tty_overlay_native
 
 The extension:
 
-- writes `/tmp/pi-overlay-<tty>.status` on `agent_start` / `agent_settled`,
-- writes the final assistant text to `/tmp/pi-overlay-<tty>.response.txt`,
+- streams newline-delimited JSON events to the overlay through the child process's **stdin**,
+- sends `{"type":"status","value":"processing"|"done"}` on agent lifecycle,
+- sends the final assistant text as `{"type":"response","text":"..."}`,
 - detects pi's TTY with `ps -o tty= -p <pi-pid>`,
 - starts `tty_overlay_native --mode tty --tty /dev/ttysXXX`,
 - does **not detach** the child, so it inherits pi's controlling TTY,
@@ -133,7 +134,8 @@ macOS does not deliver a standalone key event for a bare **Option** press to thi
 ## Notes
 
 - The original Tk prototype is kept in `legacy/tk_overlay.py` for reference. The supported implementation is the Swift app.
-- The overlay writes a local debug log to `/tmp/tty_overlay_swift.log` and `/tmp/tty_overlay_events.log` in some builds. These files are not sent anywhere.
+- Status and final-response text are sent over a pipe (stdin), not stored in `/tmp`.
+- The overlay still writes a local debug log to `/tmp/tty_overlay_swift.log` and `/tmp/tty_overlay_events.log` in some builds. These files are not sent anywhere.
 
 ## License
 

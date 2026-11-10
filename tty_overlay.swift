@@ -1,5 +1,6 @@
 import AppKit
 import AVFoundation
+import Darwin
 import Foundation
 import Speech
 
@@ -550,9 +551,6 @@ final class OverlayController: NSObject, NSWindowDelegate {
             self.keyTape.caretVisible.toggle()
             self.keyTape.needsDisplay = true
         }
-        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
-            self?.refreshAgentStatus()
-        }
         startButton.target = self
         startButton.action = #selector(toggleCapture)
         startButton.sendAction(on: [.leftMouseDown])
@@ -566,11 +564,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         responseButton.action = #selector(toggleResponse)
         responseButton.sendAction(on: [.leftMouseDown])
 
-        Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
-            self?.refreshAgentResponse()
-        }
-
         layoutViews()
+        startIPCReader()
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(keyTape)
     }
@@ -605,24 +600,67 @@ final class OverlayController: NSObject, NSWindowDelegate {
         window.makeFirstResponder(keyTape)
     }
 
-    private func responseFilePath() -> String? {
-        guard let ttyPath else { return nil }
-        let name = (ttyPath as NSString).lastPathComponent
-        return "/tmp/pi-overlay-\(name).response.txt"
+    private func startIPCReader() {
+        // Only read stdin when it is a pipe (the pi extension); do not steal
+        // keyboard input when launched manually from a terminal.
+        guard isatty(FileHandle.standardInput.fileDescriptor) == 0 else { return }
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            var buffer = Data()
+            while true {
+                let chunk = FileHandle.standardInput.availableData
+                if chunk.isEmpty { break }
+                buffer.append(chunk)
+
+                while let newline = buffer.firstIndex(of: 0x0A) {
+                    let line = buffer[..<newline]
+                    buffer.removeSubrange(0...newline)
+
+                    guard !line.isEmpty,
+                          let object = try? JSONSerialization.jsonObject(with: Data(line)),
+                          let event = object as? [String: Any] else { continue }
+
+                    DispatchQueue.main.async {
+                        self?.handleIPCEvent(event)
+                    }
+                }
+            }
+        }
     }
 
-    private func refreshAgentResponse() {
-        guard let file = responseFilePath(),
-              let raw = try? String(contentsOfFile: file, encoding: .utf8) else { return }
-        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text != responseText else { return }
-        responseText = text
-        responseTextView.string = text
-        if responseText.isEmpty {
-            responseExpanded = false
+    private func handleIPCEvent(_ event: [String: Any]) {
+        guard let type = event["type"] as? String else { return }
+
+        switch type {
+        case "status":
+            let value = (event["value"] as? String)?.lowercased() ?? ""
+            let next: KeyTapeView.AgentStatus
+            if value == "processing" {
+                next = .processing
+            } else if value == "done" {
+                next = .done
+            } else {
+                next = .idle
+            }
+            if keyTape.agentStatus != next {
+                keyTape.agentStatus = next
+                keyTape.needsDisplay = true
+            }
+
+        case "response":
+            let text = (event["text"] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            responseText = text
+            responseTextView.string = text
+            if text.isEmpty {
+                responseExpanded = false
+            }
+            updateResponseButton()
+            layoutViews()
+
+        default:
+            break
         }
-        updateResponseButton()
-        layoutViews()
     }
 
     private func updateResponseButton() {
@@ -666,32 +704,6 @@ final class OverlayController: NSObject, NSWindowDelegate {
         responseScroll.frame = NSRect(x: 10, y: textY, width: width - 20, height: textHeight)
         responseScroll.isHidden = !responseExpanded
         updateResponseButton()
-    }
-
-    private func refreshAgentStatus() {
-        guard let ttyPath else { return }
-        let name = (ttyPath as NSString).lastPathComponent
-        let file = "/tmp/pi-overlay-\(name).status"
-        guard let raw = try? String(contentsOfFile: file, encoding: .utf8) else {
-            if keyTape.agentStatus != .idle {
-                keyTape.agentStatus = .idle
-                keyTape.needsDisplay = true
-            }
-            return
-        }
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        let next: KeyTapeView.AgentStatus
-        if value == "processing" {
-            next = .processing
-        } else if value == "done" {
-            next = .done
-        } else {
-            next = .idle
-        }
-        if keyTape.agentStatus != next {
-            keyTape.agentStatus = next
-            keyTape.needsDisplay = true
-        }
     }
 
     private static func appendText(_ base: String, _ addition: String) -> String {

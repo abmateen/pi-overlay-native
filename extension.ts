@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -37,39 +37,13 @@ function resolveBinary(ctx: ExtensionContext): string | null {
 	return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
-function statusPath(ttyPath: string): string {
-	return `/tmp/pi-overlay-${path.basename(ttyPath)}.status`;
-}
-
-function responsePath(ttyPath: string): string {
-	return `/tmp/pi-overlay-${path.basename(ttyPath)}.response.txt`;
-}
-
-function setAgentStatus(ttyPath: string | null, status: "processing" | "done" | "idle"): void {
-	if (!ttyPath) return;
-	const file = statusPath(ttyPath);
+function sendEvent(event: unknown): void {
+	const stdin = overlay?.stdin;
+	if (!stdin || stdin.destroyed) return;
 	try {
-		if (status === "idle") {
-			unlinkSync(file);
-		} else {
-			writeFileSync(file, status, "utf8");
-		}
+		stdin.write(JSON.stringify(event) + "\n");
 	} catch {
-		// status updates are best-effort
-	}
-}
-
-function setAgentResponse(ttyPath: string | null, text: string): void {
-	if (!ttyPath) return;
-	const file = responsePath(ttyPath);
-	try {
-		if (text.trim().length === 0) {
-			unlinkSync(file);
-		} else {
-			writeFileSync(file, text, "utf8");
-		}
-	} catch {
-		// response updates are best-effort
+		// overlay may have exited; status/response updates are best-effort
 	}
 }
 
@@ -84,7 +58,6 @@ function killExisting(ttyPath: string): void {
 }
 
 function stopOverlay(): void {
-	setAgentStatus(overlayTty, "idle");
 	if (overlay && !overlay.killed) {
 		try {
 			overlay.kill("SIGTERM");
@@ -114,8 +87,6 @@ function startOverlay(ctx: ExtensionContext): boolean {
 
 	killExisting(ttyPath);
 	stopOverlay();
-	setAgentStatus(ttyPath, "idle");
-	setAgentResponse(ttyPath, "");
 	lastAssistantText = "";
 
 	try {
@@ -123,7 +94,7 @@ function startOverlay(ctx: ExtensionContext): boolean {
 		// so TIOCSTI can inject into the pi prompt.
 		const child = spawn(binary, ["--mode", "tty", "--tty", ttyPath], {
 			cwd: path.dirname(binary),
-			stdio: "ignore",
+			stdio: ["pipe", "ignore", "ignore"],
 		});
 		child.unref();
 
@@ -177,12 +148,12 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("agent_start", () => {
 		lastAssistantText = "";
-		setAgentStatus(overlayTty, "processing");
+		sendEvent({ type: "status", value: "processing" });
 	});
 
 	pi.on("agent_settled", () => {
-		setAgentStatus(overlayTty, "done");
-		setAgentResponse(overlayTty, lastAssistantText);
+		sendEvent({ type: "status", value: "done" });
+		sendEvent({ type: "response", text: lastAssistantText });
 	});
 
 	pi.on("session_shutdown", () => {
