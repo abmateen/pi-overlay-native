@@ -1,5 +1,7 @@
 import AppKit
+import AVFoundation
 import Foundation
+import Speech
 
 // ---------------------------------------------------------------------------
 // TIOCSTI injection
@@ -167,6 +169,90 @@ final class TtyInjector {
 }
 
 // ---------------------------------------------------------------------------
+// Speech input
+// ---------------------------------------------------------------------------
+
+final class SpeechInput {
+    private let audioEngine = AVAudioEngine()
+    private let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+    private var request: SFSpeechAudioBufferRecognitionRequest?
+    private var task: SFSpeechRecognitionTask?
+    private(set) var isListening = false
+
+    var onTranscript: ((String, Bool) -> Void)?
+    var onError: ((String) -> Void)?
+
+    func requestPermissions(_ completion: @escaping (Bool) -> Void) {
+        SFSpeechRecognizer.requestAuthorization { status in
+            guard status == .authorized else {
+                DispatchQueue.main.async { completion(false) }
+                return
+            }
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                DispatchQueue.main.async { completion(granted) }
+            }
+        }
+    }
+
+    func start() {
+        guard !isListening else { return }
+        guard let recognizer, recognizer.isAvailable else {
+            onError?("Speech recognizer unavailable")
+            return
+        }
+
+        do {
+            let request = SFSpeechAudioBufferRecognitionRequest()
+            request.shouldReportPartialResults = true
+            if recognizer.supportsOnDeviceRecognition {
+                request.requiresOnDeviceRecognition = true
+            }
+            self.request = request
+
+            let input = audioEngine.inputNode
+            let format = input.outputFormat(forBus: 0)
+            input.removeTap(onBus: 0)
+            input.installTap(onBus: 0, bufferSize: 1024, format: format) { [weak self] buffer, _ in
+                self?.request?.append(buffer)
+            }
+
+            audioEngine.prepare()
+            try audioEngine.start()
+            isListening = true
+
+            task = recognizer.recognitionTask(with: request) { [weak self] result, error in
+                guard let self else { return }
+                if let result {
+                    let text = result.bestTranscription.formattedString
+                    let final = result.isFinal
+                    DispatchQueue.main.async {
+                        self.onTranscript?(text, final)
+                    }
+                }
+                if let error {
+                    DispatchQueue.main.async {
+                        self.onError?(error.localizedDescription)
+                    }
+                }
+            }
+        } catch {
+            onError?(error.localizedDescription)
+        }
+    }
+
+    func stop() {
+        guard isListening else { return }
+        isListening = false
+        audioEngine.stop()
+        audioEngine.inputNode.removeTap(onBus: 0)
+        request?.endAudio()
+        task?.cancel()
+        task = nil
+        request = nil
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Key tape view
 // ---------------------------------------------------------------------------
 
@@ -305,7 +391,11 @@ final class OverlayController: NSObject, NSWindowDelegate {
     let targetLabel: NSTextField
     let terminalTitleLabel: NSTextField
     let startButton: NSButton
+    let voiceButton: NSButton
     let closeButton: NSButton
+
+    private let speech = SpeechInput()
+    private var voiceBase = ""
 
     let injector: TtyInjector?
     let appleInjector: AppleScriptInjector?
@@ -372,7 +462,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         terminalTitleLabel.font = NSFont.systemFont(ofSize: 9)
         terminalTitleLabel.textColor = NSColor.systemGray
         terminalTitleLabel.lineBreakMode = .byTruncatingTail
-        terminalTitleLabel.frame = NSRect(x: 326, y: size.height - 24, width: 300, height: 16)
+        terminalTitleLabel.frame = NSRect(x: 326, y: size.height - 24, width: 240, height: 16)
         container.addSubview(terminalTitleLabel)
 
         // start button
@@ -382,6 +472,13 @@ final class OverlayController: NSObject, NSWindowDelegate {
         startButton.frame = NSRect(x: size.width - 118, y: size.height - 28, width: 58, height: 24)
         startButton.title = "START"
         container.addSubview(startButton)
+
+        // voice button
+        voiceButton = NSButton(title: "MIC", target: nil, action: nil)
+        voiceButton.bezelStyle = .rounded
+        voiceButton.controlSize = .regular
+        voiceButton.frame = NSRect(x: size.width - 186, y: size.height - 28, width: 60, height: 24)
+        container.addSubview(voiceButton)
 
         // close button
         closeButton = NSButton(title: "×", target: nil, action: nil)
@@ -412,6 +509,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         startButton.target = self
         startButton.action = #selector(toggleCapture)
         startButton.sendAction(on: [.leftMouseDown])
+        voiceButton.target = self
+        voiceButton.action = #selector(toggleVoice)
+        voiceButton.sendAction(on: [.leftMouseDown])
         closeButton.target = self
         closeButton.action = #selector(closeApp)
         closeButton.sendAction(on: [.leftMouseDown])
@@ -439,6 +539,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
                 }
             }
         } else {
+            speech.stop()
+            voiceButton.title = "MIC"
             statusLabel.stringValue = "CAPTURE OFF"
             statusLabel.textColor = .systemOrange
         }
@@ -472,6 +574,77 @@ final class OverlayController: NSObject, NSWindowDelegate {
             keyTape.agentStatus = next
             keyTape.needsDisplay = true
         }
+    }
+
+    @objc func toggleVoice() {
+        if speech.isListening {
+            stopVoice()
+            return
+        }
+        if !isCapturing {
+            toggleCapture()
+        }
+        guard isCapturing else { return }
+        startVoice()
+    }
+
+    private func startVoice() {
+        statusLabel.stringValue = "MIC PERMISSION"
+        statusLabel.textColor = .systemOrange
+        voiceButton.title = "STOP"
+
+        speech.onTranscript = { [weak self] text, final in
+            guard let self else { return }
+            self.rawText = self.voiceBase + text
+            self.keyTape.needsDisplay = true
+            if final {
+                self.stopVoice()
+            }
+        }
+
+        speech.onError = { [weak self] message in
+            guard let self else { return }
+            debugLog("speech error: \(message)")
+            self.statusLabel.stringValue = "VOICE ERROR"
+            self.statusLabel.textColor = .systemRed
+            self.stopVoice()
+        }
+
+        speech.requestPermissions { [weak self] granted in
+            guard let self else { return }
+            if !granted {
+                self.statusLabel.stringValue = "MIC DENIED"
+                self.statusLabel.textColor = .systemRed
+                self.voiceButton.title = "MIC"
+                return
+            }
+
+            self.voiceBase = self.rawText
+            if !self.voiceBase.isEmpty && !self.voiceBase.hasSuffix(" ") {
+                self.voiceBase += " "
+            }
+
+            self.statusLabel.stringValue = "LISTENING"
+            self.statusLabel.textColor = .systemRed
+            self.voiceButton.title = "STOP"
+            self.speech.start()
+            if !self.speech.isListening {
+                self.stopVoice()
+            }
+        }
+    }
+
+    private func stopVoice() {
+        speech.stop()
+        voiceButton.title = "MIC"
+        if isCapturing {
+            statusLabel.stringValue = "CAPTURE ON"
+            statusLabel.textColor = .systemGreen
+        } else {
+            statusLabel.stringValue = "CAPTURE OFF"
+            statusLabel.textColor = .systemOrange
+        }
+        keyTape.needsDisplay = true
     }
 
     @objc func closeApp() {
@@ -538,6 +711,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
         let isEnter = (event.keyCode == 36 || event.keyCode == 52)
         if isEnter {
+            if speech.isListening {
+                stopVoice()
+            }
             let chunk = rawText
             var sentOk = true
             if mode == .tty, let inj = injector {

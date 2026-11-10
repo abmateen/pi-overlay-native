@@ -6,8 +6,11 @@ SWIFTC ?= swiftc
 
 all: $(BIN)
 
-$(BIN): $(SWIFT)
-	$(SWIFTC) -O -o $@ $<
+$(BIN): $(SWIFT) Info.plist
+	$(SWIFTC) -O -o $@ $< \
+		-framework Speech -framework AVFoundation \
+		-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist
+	codesign --force --sign - $@
 
 clean:
 	rm -f $(BIN)

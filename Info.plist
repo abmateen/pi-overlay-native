@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.abmateen.pi-overlay</string>
+  <key>CFBundleName</key>
+  <string>TTYOverlay</string>
+  <key>CFBundleExecutable</key>
+  <string>tty_overlay_native</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>CFBundleDisplayName</key>
+  <string>TTY Overlay</string>
+  <key>CFBundleVersion</key>
+  <string>1.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>LSMinimumSystemVersion</key>
+  <string>13.0</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>TTY Overlay uses the microphone for voice input.</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>TTY Overlay converts speech to text for the terminal input.</string>
+</dict>
+</plist>

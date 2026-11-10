@@ -24,12 +24,26 @@ type a command, then press Enter…
 | Key / control | Action |
 |---|---|
 | **Option + Space** | Start / stop capture |
+| **Option + V** | Start / stop voice input |
 | **Enter** | Send the pending line to the target TTY |
 | **Backspace** | Edit the pending line |
 | **START** | Start / stop capture |
 | **×** | Close the overlay |
 
 The overlay captures keys only while it has focus. It is not a global keylogger.
+
+## Voice input
+
+Click **MIC** or press **Option + V** to dictate into the overlay. The transcript
+appends to the current pending line; press **Enter** to send it.
+
+The first use asks macOS for:
+
+- **Microphone** access
+- **Speech Recognition** access
+
+If you deny them, enable them in **System Settings → Privacy & Security**.
+On-device recognition is used when the installed speech recognizer supports it.
 
 ## Requirements
 
