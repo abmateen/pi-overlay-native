@@ -26,6 +26,7 @@ type a command, then press Enter…
 | **Option + Space** | Start / stop capture |
 | **Option + V** | Start / stop voice input |
 | **Enter** | Send the pending line to the target TTY |
+| **Cmd + V** | Paste from clipboard |
 | **Backspace** | Edit the pending line |
 | **START** | Start / stop capture |
 | **×** | Close the overlay |

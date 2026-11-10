@@ -284,6 +284,14 @@ final class KeyTapeView: NSView {
         super.mouseDown(with: event)
     }
 
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if event.modifierFlags.contains(.command) && event.keyCode == 9 { // Cmd+V
+            controller?.pasteFromClipboard()
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+
     override func keyUp(with event: NSEvent) {
         debugLog("keyUp code=\(event.keyCode) chars='\(event.characters ?? "")' mods=\(event.modifierFlags)")
         controller?.handleKeyUp(event)
@@ -672,6 +680,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
             statusLabel.stringValue = "CAPTURE OFF"
             statusLabel.textColor = .systemOrange
         }
+        keyTape.needsDisplay = true
+    }
+
+    func pasteFromClipboard() {
+        guard let text = NSPasteboard.general.string(forType: .string) else { return }
+        let cleaned = text.trimmingCharacters(in: .newlines)
+        guard !cleaned.isEmpty else { return }
+        rawText += cleaned
         keyTape.needsDisplay = true
     }
 
