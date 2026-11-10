@@ -3,6 +3,7 @@ import AVFoundation
 import Darwin
 import Foundation
 import Speech
+import WebKit
 
 // ---------------------------------------------------------------------------
 // TIOCSTI injection
@@ -392,7 +393,7 @@ final class KeyTapeView: NSView {
 // Controller / UI
 // ---------------------------------------------------------------------------
 
-final class OverlayController: NSObject, NSWindowDelegate {
+final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate {
     let window: OverlayWindow
     let keyTape: KeyTapeView
     let ttyPath: String?
@@ -403,8 +404,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
     let voiceButton: NSButton
     let closeButton: NSButton
     let responseButton: NSButton
-    let responseScroll: NSScrollView
-    let responseTextView: NSTextView
+    let responseWebView: WKWebView
 
     private var responseExpanded = false
     private var responseText = ""
@@ -519,28 +519,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
         responseButton.isHidden = true
         container.addSubview(responseButton)
 
-        responseScroll = NSScrollView(frame: .zero)
-        responseScroll.hasVerticalScroller = true
-        responseScroll.autohidesScrollers = true
-        responseScroll.borderType = .noBorder
-        responseScroll.drawsBackground = true
-        responseScroll.backgroundColor = .white
-        responseScroll.isHidden = true
-        container.addSubview(responseScroll)
-
-        responseTextView = NSTextView(frame: .zero)
-        responseTextView.isEditable = false
-        responseTextView.isSelectable = true
-        responseTextView.drawsBackground = false
-        responseTextView.font = NSFont.systemFont(ofSize: 12)
-        responseTextView.textContainerInset = NSSize(width: 8, height: 8)
-        responseTextView.isVerticallyResizable = true
-        responseTextView.isHorizontallyResizable = false
-        responseTextView.autoresizingMask = [.width]
-        responseTextView.minSize = NSSize(width: 0, height: 0)
-        responseTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        responseTextView.textContainer?.widthTracksTextView = true
-        responseScroll.documentView = responseTextView
+        responseWebView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        responseWebView.isHidden = true
+        container.addSubview(responseWebView)
 
         super.init()
 
@@ -563,6 +544,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
         responseButton.target = self
         responseButton.action = #selector(toggleResponse)
         responseButton.sendAction(on: [.leftMouseDown])
+        responseWebView.navigationDelegate = self
+        responseWebView.loadHTMLString(Self.markdownHTML(), baseURL: nil)
 
         layoutViews()
         startIPCReader()
@@ -598,6 +581,85 @@ final class OverlayController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(keyTape)
+    }
+
+    private static func markdownHTML() -> String {
+        let exeDir = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        let jsURL = exeDir.appendingPathComponent("markdown-it.min.js")
+        let js = (try? String(contentsOf: jsURL, encoding: .utf8)) ?? ""
+
+        return """
+        <!doctype html>
+        <html>
+        <head>
+        <meta charset="utf-8">
+        <style>
+        :root { color-scheme: light; }
+        html, body { margin: 0; padding: 0; background: #ffffff; color: #111827; }
+        body { font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+        #content { padding: 10px 12px 14px; }
+        h1, h2, h3, h4 { margin: 0.75em 0 0.35em; line-height: 1.2; color: #0f172a; }
+        h1 { font-size: 1.45em; }
+        h2 { font-size: 1.25em; }
+        h3 { font-size: 1.1em; }
+        p { margin: 0.5em 0; line-height: 1.5; }
+        ul, ol { margin: 0.5em 0; padding-left: 1.5em; }
+        li { margin: 0.15em 0; }
+        table { border-collapse: collapse; width: 100%; margin: 0.65em 0; font-size: 12px; }
+        th, td { border: 1px solid #dbe3ee; padding: 5px 7px; text-align: left; vertical-align: top; }
+        th { background: #f1f5f9; font-weight: 600; }
+        code { font-family: ui-monospace, Menlo, monospace; background: #f3f4f6; padding: 1px 4px; border-radius: 4px; }
+        pre { background: #0f172a; color: #e5e7eb; padding: 10px 12px; border-radius: 8px; overflow: auto; }
+        pre code { background: none; padding: 0; color: inherit; }
+        blockquote { margin: 0.6em 0; padding: 0.1em 0.8em; border-left: 3px solid #cbd5e1; color: #475569; }
+        a { color: #2563eb; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+        hr { border: none; border-top: 1px solid #e2e8f0; margin: 0.9em 0; }
+        </style>
+        <script>\(js)</script>
+        </head>
+        <body>
+        <div id="content"></div>
+        <script>
+        const md = window.markdownit
+          ? window.markdownit({ html: false, linkify: true, typographer: true, breaks: true })
+          : null;
+        window.renderMarkdown = function(text) {
+          const content = document.getElementById('content');
+          if (md) {
+            content.innerHTML = md.render(text || '');
+          } else {
+            content.textContent = text || '';
+          }
+        };
+        </script>
+        </body>
+        </html>
+        """
+    }
+
+    private func renderMarkdown() {
+        guard let data = try? JSONSerialization.data(withJSONObject: responseText, options: .fragmentsAllowed),
+              let literal = String(data: data, encoding: .utf8) else { return }
+        responseWebView.evaluateJavaScript("renderMarkdown(\(literal));", completionHandler: nil)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        renderMarkdown()
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        if navigationAction.navigationType == .linkActivated,
+           let url = navigationAction.request.url {
+            NSWorkspace.shared.open(url)
+            decisionHandler(.cancel)
+            return
+        }
+        decisionHandler(.allow)
     }
 
     private func startIPCReader() {
@@ -651,12 +713,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
             let text = (event["text"] as? String ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             responseText = text
-            responseTextView.string = text
             if text.isEmpty {
                 responseExpanded = false
             }
             updateResponseButton()
             layoutViews()
+            renderMarkdown()
 
         default:
             break
@@ -701,8 +763,8 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
         keyTape.frame = NSRect(x: 10, y: keyY, width: width - 20, height: 120)
         responseButton.frame = NSRect(x: 16, y: headerY, width: 140, height: 20)
-        responseScroll.frame = NSRect(x: 10, y: textY, width: width - 20, height: textHeight)
-        responseScroll.isHidden = !responseExpanded
+        responseWebView.frame = NSRect(x: 10, y: textY, width: width - 20, height: textHeight)
+        responseWebView.isHidden = !responseExpanded
         updateResponseButton()
     }
 

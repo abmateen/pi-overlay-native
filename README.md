@@ -18,7 +18,7 @@ type a command, then press Enter…
 - The terminal window title is shown next to the TTY.
 - The large text area wraps long lines and has a blinking caret.
 - The bottom-right status shows **Processing** while the agent is running and **Done** in green when it settles.
-- A collapsible **Response** section under the textbox shows the final assistant text without thinking/reasoning blocks.
+- A collapsible **Response** section under the textbox renders the final assistant text as GitHub-flavored Markdown, including headings, tables, lists, code blocks, and emphasis. Thinking/reasoning blocks are excluded.
 
 ## Controls
 
@@ -65,6 +65,14 @@ This produces:
 tty_overlay_native
 ```
 
+The Markdown response panel also needs:
+
+```text
+markdown-it.min.js
+```
+
+Keep it next to `tty_overlay_native`.
+
 ## Run manually
 
 From a terminal:
@@ -89,6 +97,8 @@ Or install it as a project extension:
 mkdir -p .pi/extensions
 cp /absolute/path/to/pi-overlay-extension/extension.ts .pi/extensions/tty-overlay.ts
 ```
+
+When installing the extension manually, copy both `tty_overlay_native` and `markdown-it.min.js` into the extension directory.
 
 If the extension is copied away from the binary, set:
 
