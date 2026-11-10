@@ -126,12 +126,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
-		// The overlay is a macOS AppKit window; only start it in the TUI.
-		if (process.platform !== "darwin" || ctx.mode !== "tui") return;
-		startOverlay(ctx);
-	});
-
 	pi.on("session_shutdown", () => {
 		stopOverlay();
 	});

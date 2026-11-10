@@ -88,6 +88,8 @@ The extension:
 - stops the overlay on `session_shutdown`,
 - adds a `/overlay` command to start/stop it manually.
 
+It does **not** auto-start on session start.
+
 ## Modes
 
 The Swift binary supports:
