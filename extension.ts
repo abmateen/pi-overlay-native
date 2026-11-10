@@ -9,6 +9,7 @@ const BINARY_NAME = "tty_overlay_native";
 
 let overlay: ChildProcess | null = null;
 let overlayTty: string | null = null;
+let lastAssistantText = "";
 
 function currentTTY(): string | null {
 	try {
@@ -40,6 +41,10 @@ function statusPath(ttyPath: string): string {
 	return `/tmp/pi-overlay-${path.basename(ttyPath)}.status`;
 }
 
+function responsePath(ttyPath: string): string {
+	return `/tmp/pi-overlay-${path.basename(ttyPath)}.response.txt`;
+}
+
 function setAgentStatus(ttyPath: string | null, status: "processing" | "done" | "idle"): void {
 	if (!ttyPath) return;
 	const file = statusPath(ttyPath);
@@ -51,6 +56,20 @@ function setAgentStatus(ttyPath: string | null, status: "processing" | "done" | 
 		}
 	} catch {
 		// status updates are best-effort
+	}
+}
+
+function setAgentResponse(ttyPath: string | null, text: string): void {
+	if (!ttyPath) return;
+	const file = responsePath(ttyPath);
+	try {
+		if (text.trim().length === 0) {
+			unlinkSync(file);
+		} else {
+			writeFileSync(file, text, "utf8");
+		}
+	} catch {
+		// response updates are best-effort
 	}
 }
 
@@ -96,6 +115,8 @@ function startOverlay(ctx: ExtensionContext): boolean {
 	killExisting(ttyPath);
 	stopOverlay();
 	setAgentStatus(ttyPath, "idle");
+	setAgentResponse(ttyPath, "");
+	lastAssistantText = "";
 
 	try {
 		// Do not detach: the child must inherit pi's session/controlling TTY
@@ -146,12 +167,22 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	pi.on("message_end", (event) => {
+		if (event.message.role !== "assistant") return;
+		lastAssistantText = event.message.content
+			.map((block) => (block.type === "text" ? block.text : ""))
+			.join("")
+			.trim();
+	});
+
 	pi.on("agent_start", () => {
+		lastAssistantText = "";
 		setAgentStatus(overlayTty, "processing");
 	});
 
 	pi.on("agent_settled", () => {
 		setAgentStatus(overlayTty, "done");
+		setAgentResponse(overlayTty, lastAssistantText);
 	});
 
 	pi.on("session_shutdown", () => {

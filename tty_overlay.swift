@@ -401,6 +401,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
     let startButton: NSButton
     let voiceButton: NSButton
     let closeButton: NSButton
+    let responseButton: NSButton
+    let responseScroll: NSScrollView
+    let responseTextView: NSTextView
+
+    private var responseExpanded = false
+    private var responseText = ""
 
     private let speech = SpeechInput()
     private var voiceBase = ""
@@ -424,7 +430,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         self.appleInjector = ttyPath.map { AppleScriptInjector(ttyPath: $0) }
         self.terminalInjector = ttyPath.map { AppleScriptInjector(ttyPath: $0) }
 
-        let size = NSSize(width: 760, height: 170)
+        let size = NSSize(width: 760, height: 198)
         let origin = NSPoint(
             x: max(20, (NSScreen.main?.frame.width ?? 1440) / 2 - size.width / 2),
             y: max(80, (NSScreen.main?.frame.height ?? 900) / 2 - size.height - 260)
@@ -503,6 +509,38 @@ final class OverlayController: NSObject, NSWindowDelegate {
         keyTape.layer?.cornerRadius = 8
         container.addSubview(keyTape)
 
+        // Collapsible final-response panel under the key tape.
+        responseButton = NSButton(title: "Response ▸", target: nil, action: nil)
+        responseButton.isBordered = false
+        responseButton.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        responseButton.contentTintColor = NSColor.secondaryLabelColor
+        responseButton.alignment = .left
+        responseButton.isHidden = true
+        container.addSubview(responseButton)
+
+        responseScroll = NSScrollView(frame: .zero)
+        responseScroll.hasVerticalScroller = true
+        responseScroll.autohidesScrollers = true
+        responseScroll.borderType = .noBorder
+        responseScroll.drawsBackground = true
+        responseScroll.backgroundColor = .white
+        responseScroll.isHidden = true
+        container.addSubview(responseScroll)
+
+        responseTextView = NSTextView(frame: .zero)
+        responseTextView.isEditable = false
+        responseTextView.isSelectable = true
+        responseTextView.drawsBackground = false
+        responseTextView.font = NSFont.systemFont(ofSize: 12)
+        responseTextView.textContainerInset = NSSize(width: 8, height: 8)
+        responseTextView.isVerticallyResizable = true
+        responseTextView.isHorizontallyResizable = false
+        responseTextView.autoresizingMask = [.width]
+        responseTextView.minSize = NSSize(width: 0, height: 0)
+        responseTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        responseTextView.textContainer?.widthTracksTextView = true
+        responseScroll.documentView = responseTextView
+
         super.init()
 
         window.delegate = self
@@ -524,7 +562,15 @@ final class OverlayController: NSObject, NSWindowDelegate {
         closeButton.target = self
         closeButton.action = #selector(closeApp)
         closeButton.sendAction(on: [.leftMouseDown])
+        responseButton.target = self
+        responseButton.action = #selector(toggleResponse)
+        responseButton.sendAction(on: [.leftMouseDown])
 
+        Timer.scheduledTimer(withTimeInterval: 0.4, repeats: true) { [weak self] _ in
+            self?.refreshAgentResponse()
+        }
+
+        layoutViews()
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(keyTape)
     }
@@ -557,6 +603,69 @@ final class OverlayController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(keyTape)
+    }
+
+    private func responseFilePath() -> String? {
+        guard let ttyPath else { return nil }
+        let name = (ttyPath as NSString).lastPathComponent
+        return "/tmp/pi-overlay-\(name).response.txt"
+    }
+
+    private func refreshAgentResponse() {
+        guard let file = responseFilePath(),
+              let raw = try? String(contentsOfFile: file, encoding: .utf8) else { return }
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text != responseText else { return }
+        responseText = text
+        responseTextView.string = text
+        if responseText.isEmpty {
+            responseExpanded = false
+        }
+        updateResponseButton()
+        layoutViews()
+    }
+
+    private func updateResponseButton() {
+        responseButton.isHidden = responseText.isEmpty
+        responseButton.title = responseExpanded ? "Response ▾" : "Response ▸"
+    }
+
+    @objc func toggleResponse() {
+        guard !responseText.isEmpty else { return }
+        responseExpanded.toggle()
+        updateResponseButton()
+        layoutViews()
+    }
+
+    private func layoutViews() {
+        guard let container = window.contentView else { return }
+        let width = window.frame.width
+        let textHeight: CGFloat = responseExpanded ? 160 : 0
+        let height: CGFloat = 198 + textHeight
+
+        var frame = window.frame
+        let top = frame.maxY
+        frame.size.height = height
+        frame.origin.y = top - height
+        window.setFrame(frame, display: true)
+        container.frame = NSRect(x: 0, y: 0, width: width, height: height)
+
+        let textY: CGFloat = 8
+        let headerY = textY + textHeight + 4
+        let keyY = headerY + 24
+
+        statusLabel.frame = NSRect(x: 16, y: height - 26, width: 250, height: 20)
+        targetLabel.frame = NSRect(x: 138, y: height - 25, width: 180, height: 18)
+        terminalTitleLabel.frame = NSRect(x: 326, y: height - 24, width: 240, height: 16)
+        startButton.frame = NSRect(x: width - 118, y: height - 28, width: 58, height: 24)
+        voiceButton.frame = NSRect(x: width - 186, y: height - 28, width: 60, height: 24)
+        closeButton.frame = NSRect(x: width - 52, y: height - 28, width: 36, height: 24)
+
+        keyTape.frame = NSRect(x: 10, y: keyY, width: width - 20, height: 120)
+        responseButton.frame = NSRect(x: 16, y: headerY, width: 140, height: 20)
+        responseScroll.frame = NSRect(x: 10, y: textY, width: width - 20, height: textHeight)
+        responseScroll.isHidden = !responseExpanded
+        updateResponseButton()
     }
 
     private func refreshAgentStatus() {
