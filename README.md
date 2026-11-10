@@ -17,6 +17,7 @@ type a command, then press Enter…
 - `TTY /dev/ttys007` is the target terminal.
 - The terminal window title is shown next to the TTY.
 - The large text area wraps long lines and has a blinking caret.
+- The bottom-right status shows **Processing** while the agent is running and **Done** in green when it settles.
 
 ## Controls
 
@@ -81,6 +82,7 @@ export PI_OVERLAY_BIN=/absolute/path/to/pi-overlay-extension/tty_overlay_native
 
 The extension:
 
+- writes `/tmp/pi-overlay-<tty>.status` on `agent_start` / `agent_settled`,
 - detects pi's TTY with `ps -o tty= -p <pi-pid>`,
 - starts `tty_overlay_native --mode tty --tty /dev/ttysXXX`,
 - does **not detach** the child, so it inherits pi's controlling TTY,

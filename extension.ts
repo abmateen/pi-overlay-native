@@ -1,5 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -36,6 +36,24 @@ function resolveBinary(ctx: ExtensionContext): string | null {
 	return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
+function statusPath(ttyPath: string): string {
+	return `/tmp/pi-overlay-${path.basename(ttyPath)}.status`;
+}
+
+function setAgentStatus(ttyPath: string | null, status: "processing" | "done" | "idle"): void {
+	if (!ttyPath) return;
+	const file = statusPath(ttyPath);
+	try {
+		if (status === "idle") {
+			unlinkSync(file);
+		} else {
+			writeFileSync(file, status, "utf8");
+		}
+	} catch {
+		// status updates are best-effort
+	}
+}
+
 function killExisting(ttyPath: string): void {
 	try {
 		execFileSync("pkill", ["-f", `[t]ty_overlay_native .*--tty ${ttyPath}`], {
@@ -47,6 +65,7 @@ function killExisting(ttyPath: string): void {
 }
 
 function stopOverlay(): void {
+	setAgentStatus(overlayTty, "idle");
 	if (overlay && !overlay.killed) {
 		try {
 			overlay.kill("SIGTERM");
@@ -76,6 +95,7 @@ function startOverlay(ctx: ExtensionContext): boolean {
 
 	killExisting(ttyPath);
 	stopOverlay();
+	setAgentStatus(ttyPath, "idle");
 
 	try {
 		// Do not detach: the child must inherit pi's session/controlling TTY
@@ -124,6 +144,14 @@ export default function (pi: ExtensionAPI) {
 
 			startOverlay(ctx);
 		},
+	});
+
+	pi.on("agent_start", () => {
+		setAgentStatus(overlayTty, "processing");
+	});
+
+	pi.on("agent_settled", () => {
+		setAgentStatus(overlayTty, "done");
 	});
 
 	pi.on("session_shutdown", () => {

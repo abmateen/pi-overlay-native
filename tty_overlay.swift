@@ -175,8 +175,15 @@ final class OverlayWindow: NSWindow {
 }
 
 final class KeyTapeView: NSView {
+    enum AgentStatus {
+        case idle
+        case processing
+        case done
+    }
+
     weak var controller: OverlayController?
     var caretVisible = true
+    var agentStatus: AgentStatus = .idle
 
     override var acceptsFirstResponder: Bool { true }
     override var isFlipped: Bool { true }
@@ -248,7 +255,7 @@ final class KeyTapeView: NSView {
             x: 12,
             y: 8,
             width: max(10, bounds.width - 24),
-            height: max(10, bounds.height - 16)
+            height: max(10, bounds.height - 36)
         )
 
         NSGraphicsContext.saveGraphicsState()
@@ -256,6 +263,33 @@ final class KeyTapeView: NSView {
         NSAttributedString(string: display, attributes: attrs)
             .draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
         NSGraphicsContext.restoreGraphicsState()
+
+        drawAgentStatus()
+    }
+
+    private func drawAgentStatus() {
+        guard agentStatus != .idle else { return }
+
+        let label = agentStatus == .processing ? "Processing" : "Done"
+        let color = agentStatus == .processing ? NSColor.systemOrange : NSColor.systemGreen
+        let font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: color,
+        ]
+        let size = (label as NSString).size(withAttributes: attrs)
+        let x = bounds.width - size.width - 12
+        let y = bounds.height - size.height - 7
+
+        let pill = NSRect(
+            x: x - 6,
+            y: y - 3,
+            width: size.width + 12,
+            height: size.height + 6
+        )
+        NSColor(white: 0.97, alpha: 1).setFill()
+        NSBezierPath(roundedRect: pill, xRadius: 6, yRadius: 6).fill()
+        label.draw(at: NSPoint(x: x, y: y), withAttributes: attrs)
     }
 }
 
@@ -266,6 +300,7 @@ final class KeyTapeView: NSView {
 final class OverlayController: NSObject, NSWindowDelegate {
     let window: OverlayWindow
     let keyTape: KeyTapeView
+    let ttyPath: String?
     let statusLabel: NSTextField
     let targetLabel: NSTextField
     let terminalTitleLabel: NSTextField
@@ -285,11 +320,12 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     init(mode: Mode, ttyPath: String?) {
         self.mode = mode
+        self.ttyPath = ttyPath
         self.injector = ttyPath.map { TtyInjector(path: $0) }
         self.appleInjector = ttyPath.map { AppleScriptInjector(ttyPath: $0) }
         self.terminalInjector = ttyPath.map { AppleScriptInjector(ttyPath: $0) }
 
-        let size = NSSize(width: 760, height: 150)
+        let size = NSSize(width: 760, height: 170)
         let origin = NSPoint(
             x: max(20, (NSScreen.main?.frame.width ?? 1440) / 2 - size.width / 2),
             y: max(80, (NSScreen.main?.frame.height ?? 900) / 2 - size.height - 260)
@@ -356,7 +392,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
         container.addSubview(closeButton)
 
         // key tape
-        keyTape = KeyTapeView(frame: NSRect(x: 10, y: 10, width: size.width - 20, height: 100))
+        keyTape = KeyTapeView(frame: NSRect(x: 10, y: 10, width: size.width - 20, height: 120))
         keyTape.wantsLayer = true
         keyTape.layer?.cornerRadius = 8
         container.addSubview(keyTape)
@@ -369,6 +405,9 @@ final class OverlayController: NSObject, NSWindowDelegate {
             guard let self = self else { return }
             self.keyTape.caretVisible.toggle()
             self.keyTape.needsDisplay = true
+        }
+        Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+            self?.refreshAgentStatus()
         }
         startButton.target = self
         startButton.action = #selector(toggleCapture)
@@ -407,6 +446,32 @@ final class OverlayController: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(keyTape)
+    }
+
+    private func refreshAgentStatus() {
+        guard let ttyPath else { return }
+        let name = (ttyPath as NSString).lastPathComponent
+        let file = "/tmp/pi-overlay-\(name).status"
+        guard let raw = try? String(contentsOfFile: file, encoding: .utf8) else {
+            if keyTape.agentStatus != .idle {
+                keyTape.agentStatus = .idle
+                keyTape.needsDisplay = true
+            }
+            return
+        }
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let next: KeyTapeView.AgentStatus
+        if value == "processing" {
+            next = .processing
+        } else if value == "done" {
+            next = .done
+        } else {
+            next = .idle
+        }
+        if keyTape.agentStatus != next {
+            keyTape.agentStatus = next
+            keyTape.needsDisplay = true
+        }
     }
 
     @objc func closeApp() {
