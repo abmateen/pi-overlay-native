@@ -396,6 +396,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private let speech = SpeechInput()
     private var voiceBase = ""
+    private var voicePartial = ""
 
     let injector: TtyInjector?
     let appleInjector: AppleScriptInjector?
@@ -576,6 +577,14 @@ final class OverlayController: NSObject, NSWindowDelegate {
         }
     }
 
+    private static func appendText(_ base: String, _ addition: String) -> String {
+        let add = addition.trimmingCharacters(in: .whitespacesAndNewlines)
+        if add.isEmpty { return base }
+        if base.isEmpty { return add }
+        if add.hasPrefix(base) { return add }
+        return base + " " + add
+    }
+
     @objc func toggleVoice() {
         if speech.isListening {
             stopVoice()
@@ -595,11 +604,28 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
         speech.onTranscript = { [weak self] text, final in
             guard let self else { return }
-            self.rawText = self.voiceBase + text
-            self.keyTape.needsDisplay = true
+
             if final {
+                self.voiceBase = Self.appendText(self.voiceBase, text)
+                self.voicePartial = ""
+                self.rawText = self.voiceBase
+                self.keyTape.needsDisplay = true
                 self.stopVoice()
+                return
             }
+
+            // Keep partial transcription append-only. If the recognizer
+            // starts a new chunk instead of extending the current one,
+            // commit the previous partial before showing the new chunk.
+            if self.voicePartial.isEmpty || text.hasPrefix(self.voicePartial) {
+                self.voicePartial = text
+            } else {
+                self.voiceBase = Self.appendText(self.voiceBase, self.voicePartial)
+                self.voicePartial = text
+            }
+
+            self.rawText = Self.appendText(self.voiceBase, self.voicePartial)
+            self.keyTape.needsDisplay = true
         }
 
         speech.onError = { [weak self] message in
@@ -620,6 +646,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
             }
 
             self.voiceBase = self.rawText
+            self.voicePartial = ""
             if !self.voiceBase.isEmpty && !self.voiceBase.hasSuffix(" ") {
                 self.voiceBase += " "
             }
@@ -636,6 +663,7 @@ final class OverlayController: NSObject, NSWindowDelegate {
 
     private func stopVoice() {
         speech.stop()
+        voicePartial = ""
         voiceButton.title = "MIC"
         if isCapturing {
             statusLabel.stringValue = "CAPTURE ON"
