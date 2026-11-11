@@ -380,36 +380,189 @@ final class OverlayContainerView: NSView {
     }
 }
 
-final class KeyTapeView: NSView {
+/// Prompt text box. A real `NSTextView` inside a scroll view supplies the native
+/// caret, selection, arrow keys, mouse placement, cut/copy/paste and undo; this
+/// view only draws the white rounded background, the placeholder, and the
+/// agent-status pill in the band along the bottom edge.
+final class KeyTapeView: NSView, NSTextViewDelegate {
     enum AgentStatus {
         case idle
         case processing
         case done
     }
 
-    weak var controller: OverlayController?
-    var caretVisible = true
+    static let font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+    static let textColor = NSColor(white: 0.13, alpha: 1)
+    static var paragraphStyle: NSParagraphStyle {
+        let para = NSMutableParagraphStyle()
+        para.lineBreakMode = .byWordWrapping
+        para.alignment = .left
+        return para
+    }
+
+    /// Height of the strip along the bottom edge reserved for the Speak button
+    /// and the status pill, so wrapped text never runs underneath them.
+    static let bottomBand: CGFloat = 44
+    private static let textInset = NSSize(width: 10, height: 8)
+
+    weak var controller: OverlayController? {
+        didSet { textView.controller = controller }
+    }
+
     var agentStatus: AgentStatus = .idle
 
-    override var acceptsFirstResponder: Bool { true }
-    override var isFlipped: Bool { true }
+    let scrollView: NSScrollView
+    let textView: OverlayTextView
 
-    override func keyDown(with event: NSEvent) {
-        debugLog("keyDown code=\(event.keyCode) chars='\(event.characters ?? "")' mods=\(event.modifierFlags)")
-        controller?.handleKeyDown(event)
+    /// The prompt text, as the text view holds it.
+    var text: String { textView.string }
+
+    override var isFlipped: Bool { true }
+    /// The inner text view is the first responder; this view is just the frame.
+    override var acceptsFirstResponder: Bool { false }
+
+    override init(frame frameRect: NSRect) {
+        let inner = NSRect(x: 0, y: 0, width: max(10, frameRect.width), height: 24)
+        textView = OverlayTextView(frame: inner)
+        scrollView = NSScrollView(frame: inner)
+        super.init(frame: frameRect)
+        configureTextView()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not supported")
+    }
+
+    private func configureTextView() {
+        textView.minSize = .zero
+        textView.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.isRichText = false
+        textView.importsGraphics = false
+        textView.allowsUndo = true
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.drawsBackground = false
+        textView.textContainerInset = NSSize(width: 0, height: 2)
+        textView.textContainer?.lineFragmentPadding = 0
+        textView.textContainer?.widthTracksTextView = true
+        textView.font = Self.font
+        textView.textColor = Self.textColor
+        textView.insertionPointColor = Self.textColor
+        textView.typingAttributes = [
+            .font: Self.font,
+            .foregroundColor: Self.textColor,
+        ]
+        textView.defaultParagraphStyle = Self.paragraphStyle
+        textView.smartInsertDeleteEnabled = false
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+        textView.isAutomaticDashSubstitutionEnabled = false
+        textView.isAutomaticTextReplacementEnabled = false
+        textView.isAutomaticSpellingCorrectionEnabled = false
+        textView.isAutomaticLinkDetectionEnabled = false
+        textView.isAutomaticDataDetectionEnabled = false
+        textView.isContinuousSpellCheckingEnabled = false
+        textView.isGrammarCheckingEnabled = false
+        textView.usesFindBar = false
+        textView.isIncrementalSearchingEnabled = false
+        textView.delegate = self
+
+        scrollView.borderType = .noBorder
+        scrollView.drawsBackground = false
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.verticalScrollElasticity = .none
+        scrollView.horizontalScrollElasticity = .none
+        scrollView.documentView = textView
+        addSubview(scrollView)
+    }
+
+    /// Area inside the border that holds the text, above the bottom band.
+    var textArea: NSRect {
+        let inset = Self.textInset
+        return NSRect(
+            x: inset.width,
+            y: inset.height,
+            width: max(10, bounds.width - inset.width * 2),
+            height: max(10, bounds.height - inset.height - Self.bottomBand)
+        )
+    }
+
+    override func layout() {
+        super.layout()
+        let area = textArea
+        scrollView.frame = area
+        // Track the visible width so wrapping is stable even while the window
+        // is still settling.
+        textView.textContainer?.containerSize = NSSize(
+            width: max(10, area.width - 2),
+            height: .greatestFiniteMagnitude
+        )
+
+        let clip = scrollView.contentSize
+        guard clip.width > 1, clip.height > 1 else { return }
+        if abs(textView.frame.width - clip.width) > 0.5 {
+            textView.setFrameSize(
+                NSSize(width: clip.width, height: max(clip.height, textView.frame.height))
+            )
+        }
+        fitTextView(minHeight: clip.height)
+    }
+
+    /// Grows (or shrinks) the text view to the height its text needs, so the
+    /// scroll view only scrolls once the visible box is actually full.
+    private func fitTextView(minHeight: CGFloat) {
+        guard let manager = textView.layoutManager,
+              let container = textView.textContainer else { return }
+        manager.ensureLayout(for: container)
+        let used = manager.usedRect(for: container).height + textView.textContainerInset.height * 2
+        let height = max(max(1, minHeight), ceil(used))
+        if abs(textView.frame.height - height) > 0.5 {
+            textView.setFrameSize(NSSize(width: textView.frame.width, height: height))
+        }
+    }
+
+    /// Replaces the whole prompt (voice transcripts, tab switches, resets) and
+    /// leaves the caret at the end.
+    func setText(_ text: String) {
+        guard textView.string != text else { return }
+        textView.string = text
+        textView.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
+        needsLayout = true
+        needsDisplay = true
+        fitTextView(minHeight: scrollView.contentSize.height)
+        textView.scrollRangeToVisible(textView.selectedRange())
+    }
+
+    /// Inserts at the caret, replacing the selection (Cmd+V).
+    func insert(_ addition: String) {
+        textView.insertText(addition, replacementRange: textView.selectedRange())
+        fitTextView(minHeight: scrollView.contentSize.height)
+        textView.scrollRangeToVisible(textView.selectedRange())
+        needsDisplay = true
+    }
+
+    func focusTextView() {
+        window?.makeFirstResponder(textView)
     }
 
     override func mouseDown(with event: NSEvent) {
-        window?.makeFirstResponder(self)
+        focusTextView()
         super.mouseDown(with: event)
     }
 
-    override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.modifierFlags.contains(.command) && event.keyCode == 9 { // Cmd+V
-            controller?.pasteFromClipboard()
-            return true
-        }
-        return super.performKeyEquivalent(with: event)
+    // MARK: - NSTextViewDelegate
+
+    func textDidChange(_ notification: Notification) {
+        controller?.promptTextChanged(textView.string)
+        fitTextView(minHeight: scrollView.contentSize.height)
+        needsDisplay = true
+        textView.scrollRangeToVisible(textView.selectedRange())
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -422,44 +575,29 @@ final class KeyTapeView: NSView {
         border.lineWidth = 1
         border.stroke()
 
-        guard let controller = controller else { return }
-
-        let text: String
-        let color: NSColor
-        if controller.rawText.isEmpty {
-            text = "type…"
-            color = NSColor(white: 0.35, alpha: 1)
-        } else {
-            text = controller.rawText
-            color = NSColor(white: 0.13, alpha: 1)
+        // The placeholder sits under the (transparent) text view.
+        if textView.string.isEmpty {
+            let area = textArea
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: Self.font,
+                .foregroundColor: NSColor(white: 0.35, alpha: 1),
+                .paragraphStyle: Self.paragraphStyle,
+            ]
+            NSGraphicsContext.saveGraphicsState()
+            NSBezierPath(rect: area).addClip()
+            NSAttributedString(string: "type…", attributes: attrs)
+                .draw(
+                    with: NSRect(
+                        x: area.minX,
+                        y: area.minY + 2,
+                        width: area.width,
+                        height: area.height
+                    ),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                )
+            NSGraphicsContext.restoreGraphicsState()
         }
-
-        let font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
-        let para = NSMutableParagraphStyle()
-        para.lineBreakMode = .byCharWrapping
-        para.alignment = .left
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: para,
-        ]
-
-        // Put the caret inline at the end of the text and let it wrap with the text.
-        let display = text + (caretVisible ? "▌" : " ")
-
-        let textRect = NSRect(
-            x: 12,
-            y: 8,
-            width: max(10, bounds.width - 24),
-            // Leave the bottom band free for the Speak button.
-            height: max(10, bounds.height - 44)
-        )
-
-        NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: bounds).addClip()
-        NSAttributedString(string: display, attributes: attrs)
-            .draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
-        NSGraphicsContext.restoreGraphicsState()
 
         drawAgentStatus()
     }
@@ -493,6 +631,30 @@ final class KeyTapeView: NSView {
         NSColor(white: 0.97, alpha: 1).setFill()
         NSBezierPath(roundedRect: pill, xRadius: 6, yRadius: 6).fill()
         label.draw(at: NSPoint(x: pill.minX + 6, y: pill.minY + 3), withAttributes: attrs)
+    }
+}
+
+/// The prompt's text view: hands the overlay's window chords to the controller
+/// and lets AppKit do everything else (typing, arrows, selection, undo).
+final class OverlayTextView: NSTextView {
+    weak var controller: OverlayController?
+
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        debugLog("keyDown code=\(event.keyCode) chars='\(event.characters ?? "")' mods=\(event.modifierFlags)")
+        if controller?.handlePromptKeyDown(event) == true { return }
+        super.keyDown(with: event)
+    }
+
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        if controller?.handlePromptKeyEquivalent(event) == true { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        window?.makeFirstResponder(self)
+        super.mouseDown(with: event)
     }
 }
 
@@ -1683,7 +1845,13 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         )
     }
     var tape: [String] = []
-    var rawText: String = ""
+    /// The pending prompt. Mirrors the text box: assigning it replaces the box
+    /// contents (voice transcripts, tab switches, clearing after a send).
+    var rawText: String = "" {
+        didSet {
+            if rawText != oldValue { keyTape.setText(rawText) }
+        }
+    }
     var sentBytes = 0
     var ttyFD: Int32 = -1
 
@@ -2004,11 +2172,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         window.delegate = self
         keyTape.controller = self
-        Timer.scheduledTimer(withTimeInterval: 0.55, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            self.keyTape.caretVisible.toggle()
-            self.keyTape.needsDisplay = true
-        }
+        // native caret; no manual blink timer needed.
         voiceButton.target = self
         voiceButton.action = #selector(toggleVoice)
         voiceButton.sendAction(on: [.leftMouseDown])
@@ -2044,7 +2208,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         layoutViews()
         startIPCReader()
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(keyTape)
+        keyTape.focusTextView()
     }
 
     /// Default status when no transient message is showing. Input is always
@@ -4418,7 +4582,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private func focusOverlay() {
         NSApp.activate(ignoringOtherApps: true)
         window.makeKeyAndOrderFront(nil)
-        window.makeFirstResponder(keyTape)
+        keyTape.focusTextView()
     }
 
     private func showAlert(title: String, message: String) {
@@ -5091,7 +5255,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         guard let text = NSPasteboard.general.string(forType: .string) else { return }
         let cleaned = text.trimmingCharacters(in: .newlines)
         guard !cleaned.isEmpty else { return }
-        rawText += cleaned
+        // Insert at the caret, replacing any selection.
+        keyTape.insert(cleaned)
         keyTape.needsDisplay = true
     }
 
@@ -5109,169 +5274,144 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         layoutViews()
     }
 
-    func handleKeyDown(_ event: NSEvent) {
-        // Cmd+Q quits
-        if event.modifierFlags.contains(.command),
-           event.charactersIgnoringModifiers?.lowercased() == "q" {
+    // MARK: - Prompt box key handling
+
+    /// Cmd chords the overlay owns. Returns true when the chord was consumed;
+    /// anything else falls through to the text view (copy, select all, undo…).
+    func handlePromptKeyEquivalent(_ event: NSEvent) -> Bool {
+        guard event.modifierFlags.contains(.command) else { return false }
+        let chars = event.charactersIgnoringModifiers?.lowercased()
+
+        if chars == "q" {
             closeApp()
-            return
+            return true
         }
 
         // Cmd+M: collapse to the tab strip / restore.
-        if event.modifierFlags.contains(.command),
-           event.charactersIgnoringModifiers?.lowercased() == "m" {
+        if chars == "m" {
             toggleMinimize()
-            return
+            return true
+        }
+
+        // Cmd+V: paste through the clipboard cleaner, at the caret.
+        if event.keyCode == 9 {
+            pasteFromClipboard()
+            return true
         }
 
         // Cmd+1…9: jump to the Nth tab (RPC self mode).
-        if event.modifierFlags.contains(.command), mode == .selfHost {
-            let numberKeys: [Int: Int] = [
-                18: 1, 19: 2, 20: 3, 21: 4, 23: 5,
-                22: 6, 26: 7, 28: 8, 25: 9,
-            ]
-            if let number = numberKeys[Int(event.keyCode)] {
-                if number <= rpcTabs.count {
-                    activateRpcTab(rpcTabs[number - 1])
-                }
-                return
-            }
-        }
-
-        // Ctrl+N: choose a working directory for a pi session (self mode).
-        if event.modifierFlags.contains(.control),
-           (event.keyCode == 45 || event.charactersIgnoringModifiers?.lowercased() == "n") {
-            chooseDirectory()
-            return
-        }
-
-        // Ctrl+T / Ctrl+W: new tab / close tab (RPC self mode).
-        if event.modifierFlags.contains(.control), mode == .selfHost {
-            let chars = event.charactersIgnoringModifiers?.lowercased()
-            if event.keyCode == 17 || chars == "t" {
-                openNewTab()
-                return
-            }
-            if event.keyCode == 13 || chars == "w" {
-                closeActiveTab()
-                return
-            }
-        }
-
-        // Option+V: start/stop voice input.
-        if event.modifierFlags.contains(.option), event.keyCode == 9 {
-            toggleVoice()
-            return
-        }
-
-        // Escape aborts a running RPC turn (self mode).
-        if event.keyCode == 53, mode == .selfHost,
-           let session = activeRpcTab?.session, session.isStreaming {
-            session.abort()
-            return
-        }
-
-        // While collapsed there is no visible textbox, so text keys are ignored.
-        guard !isMinimized else { return }
-
-        var label = Self.label(for: event)
-        if label.isEmpty { return }
-        if label == " " { label = " " }
-        if label == "\n" || label == "\r" { label = "⏎" }
-        if label == "\t" { label = "⇥" }
-        if label == "\u{1B}" { label = "⎋" }
-
-        // Backspace should edit the pending line, not be sent to the tty.
-        if event.keyCode == 51 || event.keyCode == 117 {
-            if rawText.count > 0 { rawText.removeLast() }
-            keyTape.needsDisplay = true
-            return
-        }
-
-        tape.append(label)
-        if label != "SP" && label != "⏎" && label != "⇥" && label != "⌫" && label != "⎋" {
-            rawText += label
-        }
-        if tape.count > 48 { tape.removeFirst(tape.count - 48) }
-
-        let isEnter = (event.keyCode == 36 || event.keyCode == 52)
-        if isEnter {
-            if speech.isListening {
-                stopVoice()
-            }
-            let chunk = rawText
-            var sentOk = true
-            if isSelfMode {
-                sentOk = sendToActiveSession(chunk)
-            } else if mode == .tty, let inj = injector {
-                let raw = chunk + "\r"
-                sentOk = inj.inject(raw)
-            } else if mode == .terminal, let inj = terminalInjector {
-                sentOk = inj.sendTerminalScript(chunk)
-            } else if mode == .apple, let inj = appleInjector {
-                sentOk = inj.sendText(chunk) && inj.sendKey(36)
-            }
-            if sentOk {
-                sentBytes += chunk.utf8.count
-                tape.removeAll()
-                rawText.removeAll()
-            } else {
-                statusLabel.stringValue = "SEND ERROR"
-                statusLabel.textColor = .systemRed
-            }
-        }
-
-        keyTape.needsDisplay = true
-
-    }
-
-    static func label(for event: NSEvent) -> String {
-        switch Int(event.keyCode) {
-        case 36, 52: return "⏎"   // return / kp enter
-        case 51, 117: return "⌫"  // delete / backspace
-        case 48: return "⇥"
-        case 49: return " "
-        case 53: return "⎋"
-        case 123: return "←"
-        case 124: return "→"
-        case 125: return "↓"
-        case 126: return "↑"
-        case 115: return "↖"
-        case 119: return "↘"
-        case 116: return "⇞"
-        case 121: return "⇟"
-        case 122: return "F1"
-        case 120: return "F2"
-        case 99:  return "F3"
-        case 118: return "F4"
-        case 96:  return "F5"
-        case 97:  return "F6"
-        case 98:  return "F7"
-        case 100: return "F9"
-        case 101: return "F10"
-        case 109: return "F11"
-        case 103: return "F12"
-        default: break
-        }
-
-        if let chars = event.characters, let clean = cleanText(chars), !clean.isEmpty {
-            return clean
-        }
-        if let mods = event.charactersIgnoringModifiers, let clean = cleanText(mods), !clean.isEmpty {
-            return clean
-        }
-        return ""
-    }
-
-    static func cleanText(_ text: String) -> String? {
-        let allowed = text.unicodeScalars.filter { scalar in
-            if scalar.value < 0x100 {
-                return !(scalar.value < 0x20 || scalar.value == 0x7f)
+        if mode == .selfHost, let number = Self.tabNumber(for: event.keyCode) {
+            if number <= rpcTabs.count {
+                activateRpcTab(rpcTabs[number - 1])
             }
             return true
         }
-        if allowed.isEmpty { return nil }
-        return String(String.UnicodeScalarView(allowed))
+
+        return false
+    }
+
+    /// Window-level keys for the prompt box. Returns true when the key was
+    /// consumed, false to let the text view handle it natively (typing, arrows,
+    /// selection, undo, …).
+    func handlePromptKeyDown(_ event: NSEvent) -> Bool {
+        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+        if mods.contains(.command), handlePromptKeyEquivalent(event) { return true }
+
+        // Ctrl chords.
+        if mods.contains(.control) {
+            // Ctrl+N: choose a working directory for a pi session (self mode).
+            if event.keyCode == 45 || event.charactersIgnoringModifiers?.lowercased() == "n" {
+                chooseDirectory()
+                return true
+            }
+            // Ctrl+T / Ctrl+W: new tab / close tab (RPC self mode).
+            if mode == .selfHost {
+                let chars = event.charactersIgnoringModifiers?.lowercased()
+                if event.keyCode == 17 || chars == "t" {
+                    openNewTab()
+                    return true
+                }
+                if event.keyCode == 13 || chars == "w" {
+                    closeActiveTab()
+                    return true
+                }
+            }
+            return false
+        }
+
+        // Option+V: start/stop voice input.
+        if mods.contains(.option), event.keyCode == 9 {
+            toggleVoice()
+            return true
+        }
+
+        // Escape aborts a running RPC turn (self mode).
+        if event.keyCode == 53 {
+            if mode == .selfHost, let session = activeRpcTab?.session, session.isStreaming {
+                session.abort()
+                return true
+            }
+            return false
+        }
+
+        // While collapsed there is no visible textbox, so plain keys are
+        // swallowed; the chords above keep working.
+        if isMinimized { return true }
+
+        // Return sends the prompt; Shift+Return is a real line break.
+        guard event.keyCode == 36 || event.keyCode == 52 || event.keyCode == 76 else {
+            return false
+        }
+        if mods.contains(.shift) { return false }
+        sendPrompt()
+        return true
+    }
+
+    private static func tabNumber(for keyCode: UInt16) -> Int? {
+        [
+            18: 1, 19: 2, 20: 3, 21: 4, 23: 5,
+            22: 6, 26: 7, 28: 8, 25: 9,
+        ][Int(keyCode)]
+    }
+
+    /// Called by the text box whenever the user edits the prompt.
+    func promptTextChanged(_ text: String) {
+        if rawText != text { rawText = text }
+    }
+
+    /// Sends the pending prompt through the active backend and clears the box
+    /// when the send succeeded.
+    private func sendPrompt() {
+        if speech.isListening {
+            stopVoice()
+        }
+
+        // The text view is authoritative for what the user typed.
+        let chunk = keyTape.text
+        if rawText != chunk { rawText = chunk }
+
+        var sentOk = true
+        if isSelfMode {
+            sentOk = sendToActiveSession(chunk)
+        } else if mode == .tty, let inj = injector {
+            sentOk = inj.inject(chunk + "\r")
+        } else if mode == .terminal, let inj = terminalInjector {
+            sentOk = inj.sendTerminalScript(chunk)
+        } else if mode == .apple, let inj = appleInjector {
+            sentOk = inj.sendText(chunk) && inj.sendKey(36)
+        }
+
+        if sentOk {
+            sentBytes += chunk.utf8.count
+            tape.removeAll()
+            rawText.removeAll()
+        } else {
+            statusLabel.stringValue = "SEND ERROR"
+            statusLabel.textColor = .systemRed
+        }
+
+        keyTape.needsDisplay = true
     }
 }
 
@@ -5286,7 +5426,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.activate(ignoringOtherApps: true)
         controller.window.makeKeyAndOrderFront(nil)
-        controller.window.makeFirstResponder(controller.keyTape)
+        controller.keyTape.focusTextView()
         controller.keyTape.needsDisplay = true
         controller.startInitialSelfSession()
         controller.prepareInput()

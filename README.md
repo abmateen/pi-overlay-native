@@ -68,7 +68,7 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
   counts plus each profile's tabs; pick a profile or tab to switch to it and show
   the overlay. Self mode only.
 - The terminal window title is shown next to the TTY.
-- The large text area wraps long lines and has a blinking caret.
+- The large text area is a real text box: the caret, arrow keys, selection, mouse placement, undo, cut/copy/paste and word wrap are the native macOS ones.
 - The bottom-right status shows **Processing** while the agent is running and **Done** in green when it settles.
 - A collapsible **Response** section under the textbox renders the final assistant text as GitHub-flavored Markdown, including headings, tables, lists, code blocks, and emphasis. Thinking/reasoning blocks are excluded.
 - A **prompt history** dropdown beside the Response toggle lists the session's previous user prompts (newest first). Pick one to show the answer that followed it; **Latest answer** returns to the most recent turn. The list refreshes after each turn and when a session is loaded or switched. With no selection, the panel always shows the latest answer.
@@ -79,6 +79,7 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 |---|---|
 | **Option + V** | Start / stop voice input |
 | **Enter** | Send the pending line to the target TTY / pi session |
+| **Shift + Enter** | Insert a line break instead of sending |
 | **Esc** | Abort the running RPC turn (self mode) |
 | **Ctrl + N** | Choose a folder and open (or switch to) a pi session there |
 | **Ctrl + T** | New blank tab; choose its project directory |
@@ -91,9 +92,12 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 | **Profile dropdown** | Switch, create, rename, or delete profiles; each profile owns its tab set |
 | **Menu-bar icon** | Pending/completed status across profiles; open a profile/tab or quit |
 | **Tab strip** | Switch between independent RPC sessions; **＋** opens a new tab |
-| **Cmd + V** | Paste from clipboard |
+| **Cmd + V** | Paste at the caret (leading/trailing newlines are trimmed) |
+| **Cmd + C / X / A** | Copy, cut, select all in the pending line |
+| **Cmd + Z / Shift + Cmd + Z** | Undo / redo edits in the pending line |
 | **Speak button** 🎤 | Start/stop voice input (bottom-left inside the textbox; same as Option + V) |
-| **Backspace** | Edit the pending line |
+| **Arrows / click / drag** | Move the caret, place it with the mouse, or select text |
+| **Backspace** | Delete the character or selection before the caret |
 | **▾ / ▴** in the tab strip | Minimize the overlay to just the tabs / restore it |
 | **⤢ / ⤡** | Maximize to the screen's visible area (keeps the menu bar) / restore the overlay |
 | **Cmd + M** | Same as **▾ / ▴** |
