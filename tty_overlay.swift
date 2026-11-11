@@ -3999,6 +3999,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 }
                 renderMarkdown(in: tab.webView, text: tab.responseText)
             }
+            notifyTurnFinished(profile: profileName(for: tab), tab: tab, text: finalText)
             debugLog("rpc final tab=\(tabTitle(tab)) chars=\(finalText.count)")
 
         case "message_update":
@@ -4748,6 +4749,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 keyTape.agentStatus = next
                 keyTape.needsDisplay = true
                 updateStatusItem()
+                // Extension modes report completion through IPC, not RPC.
+                if next == .done, mode != .selfHost {
+                    notifyTurnFinished(profile: nil, tab: nil, text: latestResponseText)
+                }
             }
 
         case "response":
@@ -4822,6 +4827,128 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         guard window.isVisible else { return }
         window.orderOut(nil)
         debugLog("hidden; reopen from the menu-bar icon")
+    }
+
+    // MARK: - Notifications
+
+    private static let clickNotificationName =
+        NSNotification.Name("com.abmateen.pi-overlay.notification-click")
+
+    /// The helper `.app` that owns the notification permission (see
+    /// notifier.swift). macOS refuses UserNotifications for a process that was
+    /// not launched as an app bundle, which is how the pi extension starts the
+    /// overlay, so posting goes through this bundle instead.
+    private var notificationHelperURL: URL? {
+        var candidates: [String] = []
+        if let override = ProcessInfo.processInfo.environment["PI_OVERLAY_NOTIFIER"] {
+            candidates.append(override)
+        }
+        candidates.append(
+            FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent("Applications/PiOverlayNotifier.app").path
+        )
+        candidates.append(
+            URL(fileURLWithPath: CommandLine.arguments[0])
+                .deletingLastPathComponent()
+                .appendingPathComponent("PiOverlayNotifier.app").path
+        )
+
+        return candidates
+            .map { URL(fileURLWithPath: $0) }
+            .first { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
+    /// Listens for the helper's click report; a click brings the overlay back
+    /// on the tab that finished.
+    func setupNotifications() {
+        DistributedNotificationCenter.default().addObserver(
+            forName: Self.clickNotificationName,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self else { return }
+            let info = note.userInfo ?? [:]
+            let profile = info["profile"] as? String ?? ""
+            let tabID = (info["tab"] as? String).flatMap { UUID(uuidString: $0) }
+            self.openFromNotification(profile: profile, tabID: tabID)
+        }
+        debugLog("notifications helper=\(notificationHelperURL?.path ?? "missing")")
+    }
+
+    /// Posts "prompt finished" when the overlay is hidden, carrying enough
+    /// context to jump back to the tab that finished.
+    private func notifyTurnFinished(profile: String?, tab: RpcTab?, text: String) {
+        guard !window.isVisible else { return }
+
+        let directoryName = (tab?.directory ?? activeDirectory).lastPathComponent
+        let body = Self.notificationBody(text)
+        postNotification(
+            title: "pi · \(directoryName)",
+            body: body.isEmpty ? "Turn finished" : body,
+            profile: profile ?? "",
+            tab: tab
+        )
+    }
+
+    /// One line of the answer, long enough to be recognisable.
+    private static func notificationBody(_ text: String) -> String {
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard collapsed.count > 180 else { return collapsed }
+        return String(collapsed.prefix(180)) + "…"
+    }
+
+    /// Which profile a tab belongs to, active or parked.
+    private func profileName(for tab: RpcTab) -> String? {
+        if rpcTabs.contains(where: { $0.id == tab.id }) { return activeProfileName }
+        for (name, runtime) in profileRuntime
+        where runtime.tabs.contains(where: { $0.id == tab.id }) {
+            return name
+        }
+        return nil
+    }
+
+    private func postNotification(
+        title: String,
+        body: String,
+        profile: String,
+        tab: RpcTab?
+    ) {
+        guard let helper = notificationHelperURL else {
+            debugLog("notification skipped: PiOverlayNotifier.app not installed")
+            return
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = [
+            "-n", "-a", helper.path, "--args",
+            "--post",
+            "--title", title,
+            "--body", body,
+            "--profile", profile,
+            "--tab", tab?.id.uuidString ?? "",
+        ]
+        do {
+            try process.run()
+            debugLog("notification posted title='\(title)' tab=\(tab?.id.uuidString ?? "nil")")
+        } catch {
+            debugLog("notification helper failed: \(error)")
+        }
+    }
+
+    /// Brings the overlay back on the tab that finished.
+    private func openFromNotification(profile: String, tabID: UUID?) {
+        debugLog("notification clicked profile=\(profile) tab=\(tabID?.uuidString ?? "nil")")
+
+        if !profile.isEmpty, profile != activeProfileName {
+            switchProfile(to: profile)
+        }
+        if let tabID, let tab = rpcTab(withID: tabID) {
+            activateRpcTab(tab)
+        }
+        statusShowOverlay()
     }
 
     @objc func toggleMinimize() {
@@ -5356,6 +5483,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.startInitialSelfSession()
         controller.prepareInput()
         controller.installStatusItem()
+        controller.setupNotifications()
 
         // App-level key/flag monitor so we can see if any input actually lands
         // in the overlay even when it’s not first responder.

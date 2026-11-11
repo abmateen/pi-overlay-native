@@ -99,6 +99,7 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 | **Backspace** | Delete the character or selection before the caret |
 | **▾ / ▴** in the tab strip | Minimize the overlay to just the tabs / restore it |
 | **👁 (hide)** | Hide the window only; reopen it with **Show Overlay** from the menu-bar icon |
+| **Notification click** | Brings the overlay back on the tab whose turn finished |
 | **Cmd + M** | Same as **▾ / ▴** |
 | **Drag edge or corner** | Resize the overlay; the size is remembered (the Response panel takes extra height while open) |
 | **×** | Close the overlay |
@@ -108,6 +109,27 @@ toggle. It is not a global keylogger.
 
 While minimized, only the tab strip is clickable: text keys are ignored, but tab
 switching, **＋**, **▾/▴**, Ctrl+T/Ctrl+W, Ctrl+N and Cmd+M still work.
+
+## Notifications
+
+While the overlay is hidden, every finished turn posts a system notification:
+the title is `pi · <folder>`, the body is the first ~180 characters of the
+answer, and clicking it reopens the overlay on that tab (switching profile
+first if the tab belongs to another one). Nothing is posted while the window is
+visible, and hiding does not lose anything — the notification is only a way
+back.
+
+The first notification asks macOS for permission for **pi overlay**. Allow it
+once; if the prompt was dismissed, enable it later under **System Settings →
+Notifications → pi overlay**.
+
+Notifications are posted by a small helper app, `PiOverlayNotifier.app`
+(`notifier.swift`), because a process spawned by the pi extension is not
+allowed to use UserNotifications itself. `make install-notifier` puts it in
+`~/Applications` and registers it with LaunchServices; the overlay looks for it
+there (then next to its own binary, then in `$PI_OVERLAY_NOTIFIER`). Without the
+helper, hiding still works — only the notification is skipped, and the debug log
+says so.
 
 ## Voice input
 
@@ -141,6 +163,13 @@ This produces:
 
 ```text
 tty_overlay_native
+```
+
+Notifications need the helper app, which has to live in a stable location for
+macOS to let it ask for permission:
+
+```bash
+make install-notifier    # builds PiOverlayNotifier.app and installs it in ~/Applications
 ```
 
 The Markdown response panel also needs:
