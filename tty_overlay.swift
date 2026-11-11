@@ -3999,7 +3999,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 }
                 renderMarkdown(in: tab.webView, text: tab.responseText)
             }
-            notifyTurnFinished(profile: profileName(for: tab), tab: tab, text: finalText)
+            notifyTurnFinished(profile: profileName(for: tab), tab: tab)
             debugLog("rpc final tab=\(tabTitle(tab)) chars=\(finalText.count)")
 
         case "message_update":
@@ -4751,7 +4751,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 updateStatusItem()
                 // Extension modes report completion through IPC, not RPC.
                 if next == .done, mode != .selfHost {
-                    notifyTurnFinished(profile: nil, tab: nil, text: latestResponseText)
+                    notifyTurnFinished(profile: nil, tab: nil)
                 }
             }
 
@@ -4876,27 +4876,18 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     /// Posts "prompt finished" when the overlay is hidden, carrying enough
-    /// context to jump back to the tab that finished.
-    private func notifyTurnFinished(profile: String?, tab: RpcTab?, text: String) {
+    /// context to jump back to the tab that finished. The notification only
+    /// names the tab; the answer itself stays in the overlay.
+    private func notifyTurnFinished(profile: String?, tab: RpcTab?) {
         guard !window.isVisible else { return }
 
-        let directoryName = (tab?.directory ?? activeDirectory).lastPathComponent
-        let body = Self.notificationBody(text)
+        let tabName = tab?.directory?.lastPathComponent ?? activeDirectory.lastPathComponent
         postNotification(
-            title: "pi · \(directoryName)",
-            body: body.isEmpty ? "Turn finished" : body,
+            title: tabName,
+            body: "Update is available under the tab",
             profile: profile ?? "",
             tab: tab
         )
-    }
-
-    /// One line of the answer, long enough to be recognisable.
-    private static func notificationBody(_ text: String) -> String {
-        let collapsed = text
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard collapsed.count > 180 else { return collapsed }
-        return String(collapsed.prefix(180)) + "…"
     }
 
     /// Which profile a tab belongs to, active or parked.
@@ -4932,7 +4923,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         ]
         do {
             try process.run()
-            debugLog("notification posted title='\(title)' tab=\(tab?.id.uuidString ?? "nil")")
+            debugLog("notification posted title='\(title)' body='\(body)' tab=\(tab?.id.uuidString ?? "nil")")
         } catch {
             debugLog("notification helper failed: \(error)")
         }

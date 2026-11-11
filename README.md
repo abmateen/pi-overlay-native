@@ -113,8 +113,9 @@ switching, **＋**, **▾/▴**, Ctrl+T/Ctrl+W, Ctrl+N and Cmd+M still work.
 ## Notifications
 
 While the overlay is hidden, every finished turn posts a system notification:
-the title is `pi · <folder>`, the body is the first ~180 characters of the
-answer, and clicking it reopens the overlay on that tab (switching profile
+the title is the tab's name (the folder it runs in) and the body is simply
+"Update is available under the tab". No answer text is copied into the
+notification — clicking it reopens the overlay on that tab (switching profile
 first if the tab belongs to another one). Nothing is posted while the window is
 visible, and hiding does not lose anything — the notification is only a way
 back.

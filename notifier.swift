@@ -86,7 +86,7 @@ final class NotifierApp: NSObject, NSApplicationDelegate, UNUserNotificationCent
 
             let content = UNMutableNotificationContent()
             content.title = argument("--title") ?? "pi"
-            content.body = argument("--body") ?? "Turn finished"
+            content.body = argument("--body") ?? "Update is available under the tab"
             content.sound = .default
             content.userInfo = [
                 "profile": argument("--profile") ?? "",
