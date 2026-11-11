@@ -29,15 +29,17 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 - Typing is always enabled: the overlay only receives keys while its window is
   focused, so there is no separate capture/START toggle.
 - The window is resizable: drag any edge or corner. The size is remembered
-  between launches. Extra height goes to the Response panel while it is open;
-  otherwise the textbox grows with the window.
+  between launches; on a fresh launch it opens at 900 × 695 pt (clamped to the
+  screen), anchored to the bottom of the visible area. Extra height goes to the
+  Response panel while it is open; otherwise the textbox grows with the window.
 - **▾** collapses the overlay to just the tabs (32 pt tall) and **▴** restores
   it; **⤢** maximizes the window like the green zoom button (fills the screen,
   keeps the menu bar and Dock, and leaves overlay mode); **×** closes the
-  overlay. Leaving maximize (via **⤡** or **▾**) returns to the compact default
-  frame — wide enough for the textbox and answer panel — anchored to the bottom
-  of the screen. Collapsing while maximized first re-activates overlay mode, so
-  the collapsed strip and its restored size use that floating overlay geometry.
+  overlay. Leaving maximize (via **⤡** or **▾**) returns to the same 900 × 695
+  default frame — wide enough for the textbox and answer panel — anchored to the
+  bottom of the screen. Collapsing while maximized first re-activates overlay
+  mode, so the collapsed strip and its restored size use that floating overlay
+  geometry.
   In self mode these live in the tab strip, so they stay reachable while
   collapsed.
 - `TTY /dev/ttys007` is the target terminal.

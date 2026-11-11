@@ -1841,13 +1841,21 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         NSSize(width: 720, height: mode == .selfHost ? 200 : 170)
     }
 
+    /// Window height the overlay opens at, and returns to when leaving
+    /// maximize. A saved frame always wins; this is the default for a fresh
+    /// launch. Clamped to the screen's visible height.
+    private static let defaultWindowHeight: CGFloat = 695
+
     /// Compact window used when leaving maximize: wide enough for the textbox
     /// and the answer panel, anchored to the bottom of the visible screen.
     private var defaultOverlayFrame: NSRect {
         let screen = window.screen ?? NSScreen.main
         let visible = screen?.visibleFrame ?? window.frame
         let width = min(900, max(baseMinSize.width, visible.width - 40))
-        let height = min(comfortableHeight, max(baseMinSize.height, visible.height - 40))
+        let height = min(
+            Self.defaultWindowHeight,
+            max(baseMinSize.height, visible.height - 40)
+        )
         return NSRect(
             x: visible.midX - width / 2,
             y: visible.minY + 12,
@@ -1880,11 +1888,19 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         self.appleInjector = ttyPath.map { AppleScriptInjector(ttyPath: $0) }
         self.terminalInjector = ttyPath.map { AppleScriptInjector(ttyPath: $0) }
 
-        let size = NSSize(width: 900, height: mode == .selfHost ? 258 : 198)
+        let visible = NSScreen.main?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let size = NSSize(
+            width: min(900, max(720, visible.width - 40)),
+            height: min(
+                Self.defaultWindowHeight,
+                max(mode == .selfHost ? 200 : 170, visible.height - 40)
+            )
+        )
         let initialTabExtra: CGFloat = mode == .selfHost ? 30 : 0
         let origin = NSPoint(
-            x: max(20, (NSScreen.main?.frame.width ?? 1440) / 2 - size.width / 2),
-            y: max(80, (NSScreen.main?.frame.height ?? 900) / 2 - size.height - 260)
+            x: max(20, visible.midX - size.width / 2),
+            y: visible.minY + 12
         )
 
         window = OverlayWindow(
@@ -1906,6 +1922,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         // Remember the size/position the user drags out.
         window.setFrameAutosaveName("PiOverlayWindow")
+        debugLog("window frame=\(NSStringFromRect(window.frame)) screen=\(NSStringFromRect((window.screen ?? NSScreen.main)?.visibleFrame ?? .zero))")
         if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
             var restored = window.frame
             restored.size.width = max(restored.width, window.minSize.width)
@@ -1921,7 +1938,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                window.frame.height >= visible.height - 1 {
                 let width = min(900, max(window.minSize.width, visible.width - 40))
                 let height = min(
-                    (mode == .selfHost ? 258 : 198) + Self.responsePanelHeight,
+                    Self.defaultWindowHeight,
                     max(window.minSize.height, visible.height - 40)
                 )
                 window.setFrame(
