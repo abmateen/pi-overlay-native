@@ -1744,7 +1744,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let voiceButton: NSButton
     let closeButton: NSButton
     let minimizeButton: NSButton
-    let maximizeButton: NSButton
+    let hideButton: NSButton
     let sessionPopup: NSPopUpButton
     let newSessionButton: NSButton
     let sessionLabel: NSTextField
@@ -1823,11 +1823,6 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     var terminalInjector: AppleScriptInjector?
 
     private var isMinimized = false
-    private var isMaximizedWindow = false
-    private var maximizeRestoreLevel: NSWindow.Level = .floating
-    private var maximizeRestoreBehavior: NSWindow.CollectionBehavior =
-        [.canJoinAllSpaces, .fullScreenAuxiliary]
-    private var maximizeWasMovable = true
     private var expandedHeight: CGFloat = 0
     private var sessionInfos: [PiSessionInfo] = []
     private var sessionLoadToken = 0
@@ -1841,28 +1836,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         NSSize(width: 720, height: mode == .selfHost ? 200 : 170)
     }
 
-    /// Window height the overlay opens at, and returns to when leaving
-    /// maximize. A saved frame always wins; this is the default for a fresh
-    /// launch. Clamped to the screen's visible height.
+    /// Window height the overlay opens at: the default for a fresh launch and
+    /// for a saved frame that filled the screen. A saved frame always wins.
+    /// Clamped to the screen's visible height.
     private static let defaultWindowHeight: CGFloat = 695
 
-    /// Compact window used when leaving maximize: wide enough for the textbox
-    /// and the answer panel, anchored to the bottom of the visible screen.
-    private var defaultOverlayFrame: NSRect {
-        let screen = window.screen ?? NSScreen.main
-        let visible = screen?.visibleFrame ?? window.frame
-        let width = min(900, max(baseMinSize.width, visible.width - 40))
-        let height = min(
-            Self.defaultWindowHeight,
-            max(baseMinSize.height, visible.height - 40)
-        )
-        return NSRect(
-            x: visible.midX - width / 2,
-            y: visible.minY + 12,
-            width: width,
-            height: height
-        )
-    }
     var tape: [String] = []
     /// The pending prompt. Mirrors the text box: assigning it replaces the box
     /// contents (voice transcripts, tab switches, clearing after a send).
@@ -1930,8 +1908,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             window.setFrame(restored, display: false)
         }
 
-        // If a previous run quit while the window was maximized, start from the
-        // compact bottom-anchored frame instead of a screen-sized overlay.
+        // If a previous run quit while the window filled the screen, start from
+        // the default bottom-anchored frame instead of a screen-sized overlay.
         if let screen = window.screen ?? NSScreen.main {
             let visible = screen.visibleFrame
             if window.frame.width >= visible.width - 1,
@@ -2146,23 +2124,33 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         minimizeButton.toolTip = "Minimize to the tab strip (Cmd+M)"
         container.addSubview(minimizeButton)
 
-        // fullscreen: leaves overlay mode and fills the screen like a normal app
-        maximizeButton = NSButton(title: "", target: nil, action: nil)
-        maximizeButton.isBordered = false
-        maximizeButton.wantsLayer = true
-        maximizeButton.layer?.cornerRadius = 6
-        maximizeButton.layer?.borderWidth = 0.5
-        maximizeButton.layer?.borderColor = NSColor(white: 0.68, alpha: 0.95).cgColor
-        maximizeButton.layer?.backgroundColor = NSColor.white.cgColor
-        maximizeButton.imagePosition = .imageOnly
-        maximizeButton.imageScaling = .scaleProportionallyDown
-        maximizeButton.contentTintColor = .labelColor
-        maximizeButton.symbolConfiguration = NSImage.SymbolConfiguration(
+        // hide: orders the window out without touching its size or the pi
+        // children; the menu-bar icon brings it back.
+        hideButton = NSButton(title: "", target: nil, action: nil)
+        hideButton.isBordered = false
+        hideButton.wantsLayer = true
+        hideButton.layer?.cornerRadius = 6
+        hideButton.layer?.borderWidth = 0.5
+        hideButton.layer?.borderColor = NSColor(white: 0.68, alpha: 0.95).cgColor
+        hideButton.layer?.backgroundColor = NSColor.white.cgColor
+        hideButton.imagePosition = .imageOnly
+        hideButton.imageScaling = .scaleProportionallyDown
+        hideButton.contentTintColor = .labelColor
+        hideButton.symbolConfiguration = NSImage.SymbolConfiguration(
             pointSize: 13,
             weight: .semibold
         )
-        maximizeButton.toolTip = "Maximize — fills the screen, keeps the menu bar"
-        container.addSubview(maximizeButton)
+        if let image = NSImage(
+            systemSymbolName: "eye.slash",
+            accessibilityDescription: "Hide overlay"
+        ) {
+            hideButton.image = image
+        } else {
+            hideButton.title = "–"
+        }
+        hideButton.toolTip = "Hide the overlay — reopen it from the menu-bar icon"
+        hideButton.setAccessibilityLabel("Hide overlay")
+        container.addSubview(hideButton)
 
         // key tape
         keyTape = KeyTapeView(frame: NSRect(x: 10, y: 10, width: size.width - 20, height: 120))
@@ -2212,10 +2200,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         minimizeButton.action = #selector(toggleMinimize)
         minimizeButton.sendAction(on: [.leftMouseDown])
         updateMinimizeButton()
-        maximizeButton.target = self
-        maximizeButton.action = #selector(toggleMaximize)
-        maximizeButton.sendAction(on: [.leftMouseDown])
-        updateMaximizeButton()
+        hideButton.target = self
+        hideButton.action = #selector(hideOverlay)
+        hideButton.sendAction(on: [.leftMouseDown])
         responseButton.target = self
         responseButton.action = #selector(toggleResponse)
         responseButton.sendAction(on: [.leftMouseDown])
@@ -2718,10 +2705,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     // MARK: - Menu bar status item
 
-    /// Installs the background menu-bar icon (self mode only). It mirrors the
-    /// processing/completed state of every tab in every profile.
+    /// Installs the background menu-bar icon in every mode. It mirrors the
+    /// processing/completed state of every tab in every profile, and its menu is
+    /// how a hidden overlay comes back.
     func installStatusItem() {
-        guard mode == .selfHost, statusItem == nil else { return }
+        guard statusItem == nil else { return }
 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.imagePosition = .imageOnly
@@ -4759,6 +4747,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             if keyTape.agentStatus != next {
                 keyTape.agentStatus = next
                 keyTape.needsDisplay = true
+                updateStatusItem()
             }
 
         case "response":
@@ -4827,107 +4816,15 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         minimizeButton.setAccessibilityLabel(description)
     }
 
-    private func updateMaximizeButton() {
-        let maximized = isMaximizedWindow
-        let symbol = maximized
-            ? "arrow.down.right.and.arrow.up.left"
-            : "arrow.up.left.and.arrow.down.right"
-        let description = maximized ? "Restore window" : "Maximize window"
-        if let image = NSImage(
-            systemSymbolName: symbol,
-            accessibilityDescription: description
-        ) {
-            maximizeButton.image = image
-            maximizeButton.title = ""
-        } else {
-            maximizeButton.image = nil
-            maximizeButton.title = maximized ? "⤡" : "⤢"
-        }
-        maximizeButton.toolTip = maximized
-            ? "Restore the overlay window"
-            : "Maximize — fills the screen, keeps the menu bar, and leaves overlay mode"
-        maximizeButton.setAccessibilityLabel(description)
-    }
-
-    /// Maximizes like the green zoom button: fills the screen's *visible* frame
-    /// so the menu bar and Dock stay usable. It also leaves overlay mode (normal
-    /// window level, current space only) instead of entering a fullscreen space.
-    @objc func toggleMaximize() {
-        if isMaximizedWindow {
-            restoreWindow()
-        } else {
-            maximizeWindow()
-        }
-    }
-
-    private func maximizeWindow() {
-        if isMinimized { toggleMinimize() }
-        if window.attachedSheet != nil { return }
-
-        maximizeRestoreLevel = window.level
-        maximizeRestoreBehavior = window.collectionBehavior
-        maximizeWasMovable = window.isMovableByWindowBackground
-
-        window.level = .normal
-        window.collectionBehavior = []
-        window.isMovableByWindowBackground = false
-        // Do not let the maximized geometry overwrite the saved compact overlay
-        // frame; it is restored when we leave maximize.
-        window.setFrameAutosaveName("")
-
-        let screen = window.screen ?? NSScreen.main
-        let target = screen?.visibleFrame ?? window.frame
-        window.setFrame(target, display: true, animate: true)
-
-        window.contentView?.layer?.cornerRadius = 0
-        window.contentView?.layer?.borderWidth = 0
-        isMaximizedWindow = true
-        updateMaximizeButton()
-        layoutViews()
-        debugLog("maximize frame=\(NSStringFromRect(window.frame)) level=\(window.level.rawValue)")
-    }
-
-    /// Leaves maximize and re-activates overlay mode (floating level, all-spaces
-    /// behavior). The window returns to its compact default frame, anchored to
-    /// the bottom of the visible screen so the textbox and answer fit there.
-    private func exitMaximize(animated: Bool) {
-        guard isMaximizedWindow else { return }
-        isMaximizedWindow = false
-        window.level = maximizeRestoreLevel
-        window.collectionBehavior = maximizeRestoreBehavior
-        window.isMovableByWindowBackground = maximizeWasMovable
-        window.setFrame(defaultOverlayFrame, display: true, animate: animated)
-        window.contentView?.layer?.cornerRadius = 10
-        window.contentView?.layer?.borderWidth = 1.4
-        updateMaximizeButton()
-        // Re-enable frame autosave once the restore animation has settled, so an
-        // intermediate (still large) frame is never what gets saved.
-        if animated {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                guard let self, !self.isMaximizedWindow else { return }
-                self.window.setFrameAutosaveName("PiOverlayWindow")
-            }
-        } else {
-            window.setFrameAutosaveName("PiOverlayWindow")
-        }
-        debugLog("restore compact frame=\(NSStringFromRect(window.frame))")
-    }
-
-    private func restoreWindow() {
-        exitMaximize(animated: true)
-        layoutViews()
-        focusOverlay()
-        debugLog("restore frame=\(NSStringFromRect(window.frame)) level=\(window.level.rawValue)")
+    /// Hides the window without closing it: the pi children, tabs and prompt
+    /// keep running, and the menu-bar icon brings the overlay back.
+    @objc func hideOverlay() {
+        guard window.isVisible else { return }
+        window.orderOut(nil)
+        debugLog("hidden; reopen from the menu-bar icon")
     }
 
     @objc func toggleMinimize() {
-        // Collapsing a maximized window must bring back overlay mode first, so
-        // the collapsed strip and its restore size use the overlay geometry.
-        if !isMinimized, isMaximizedWindow {
-            exitMaximize(animated: false)
-            debugLog("collapse from maximize -> overlay frame=\(NSStringFromRect(window.frame))")
-        }
-
         isMinimized.toggle()
         window.minSize = isMinimized ? NSSize(width: 300, height: collapsedHeight) : baseMinSize
 
@@ -5039,12 +4936,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         let topRowY = height - 29
         let headerRowY = headerBase - 28
-        // Right cluster is [▾] [⤢] [×]. In RPC mode the window controls live in
-        // the tab strip so they stay reachable when collapsed.
+        // Right cluster is [▾] [hide] [×]. In RPC mode the window controls live
+        // in the tab strip so they stay reachable when collapsed.
         let windowControlY = mode == .selfHost ? topRowY : headerRowY
         statusLabel.frame = NSRect(x: 16, y: headerBase - 26, width: 120, height: 20)
         closeButton.frame = NSRect(x: width - 36, y: windowControlY, width: 28, height: 24)
-        maximizeButton.frame = NSRect(x: width - 70, y: windowControlY, width: 28, height: 24)
+        hideButton.frame = NSRect(x: width - 70, y: windowControlY, width: 28, height: 24)
         minimizeButton.frame = NSRect(x: width - 104, y: windowControlY, width: 28, height: 24)
 
         // Left edge of the right-hand control cluster, leaving room for the PID.
@@ -5078,7 +4975,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         pidLabel.isHidden = mode != .selfHost || collapseHeader
         statusLabel.isHidden = collapseHeader
         closeButton.isHidden = false
-        maximizeButton.isHidden = false
+        hideButton.isHidden = false
 
         // The textbox is never visible while collapsed, but it stays in the
         // window (transparent, not hidden) so it remains first responder and

@@ -12,7 +12,7 @@ in a directory you pick (`self` mode, the default when launched on its own).
 ## What it looks like
 
 ```text
-TTY /dev/ttys007                pi — my-session          ▾   ⤢   ×
+TTY /dev/ttys007                pi — my-session        ▾   👁   ×
 🎤  type a command, then press Enter…
 ```
 
@@ -20,7 +20,7 @@ In self mode the TTY label is replaced by a directory dropdown, a model
 dropdown, and the `pi` RPC child PID, with a row of saved sessions underneath:
 
 ```text
-👤 daily ▾  [ pi-overlay-extension  × ] [ ● /tmp  × ] [ ✓ api-server  × ]     ＋   ▾   ⤢   ×
+👤 daily ▾  [ pi-overlay-extension  × ] [ ● /tmp  × ] [ ✓ api-server  × ]     ＋   ▾   👁   ×
 📁 pi-overlay-extension ▾   [DeepSeek V4.1 Flash ▾]   pi 42165
 Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 🎤  type a command, then press Enter…
@@ -33,13 +33,9 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
   screen), anchored to the bottom of the visible area. Extra height goes to the
   Response panel while it is open; otherwise the textbox grows with the window.
 - **▾** collapses the overlay to just the tabs (32 pt tall) and **▴** restores
-  it; **⤢** maximizes the window like the green zoom button (fills the screen,
-  keeps the menu bar and Dock, and leaves overlay mode); **×** closes the
-  overlay. Leaving maximize (via **⤡** or **▾**) returns to the same 900 × 695
-  default frame — wide enough for the textbox and answer panel — anchored to the
-  bottom of the screen. Collapsing while maximized first re-activates overlay
-  mode, so the collapsed strip and its restored size use that floating overlay
-  geometry.
+  it; **👁** hides the window — it keeps its size, position, prompt and running
+  pi sessions, and comes back from **Show Overlay** in the menu-bar icon's
+  menu; **×** closes the overlay.
   In self mode these live in the tab strip, so they stay reachable while
   collapsed.
 - `TTY /dev/ttys007` is the target terminal.
@@ -67,8 +63,9 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 - A **menu-bar status icon** mirrors all profiles: an orange hourglass while any
   tab is processing, a green check when the most recent work completed, and a
   neutral terminal when idle. Its menu lists every profile with pending/completed
-  counts plus each profile's tabs; pick a profile or tab to switch to it and show
-  the overlay. Self mode only.
+  counts plus each profile's tabs; pick a profile or tab to switch to it and
+  show the overlay. Its **Show Overlay** item also brings back a hidden window,
+  and it is installed in every mode so hiding is never a one-way trip.
 - The terminal window title is shown next to the TTY.
 - The large text area is a real text box: the caret, arrow keys, selection, mouse placement, undo, cut/copy/paste and word wrap are the native macOS ones.
 - The bottom-right status shows **Processing** while the agent is running and **Done** in green when it settles.
@@ -92,7 +89,7 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 | **＋ next to Sessions** | Start a new conversation in the active tab (like `/new`) |
 | **Prompt history dropdown** | Show the answer for a previous user prompt, or **Latest answer** |
 | **Profile dropdown** | Switch, create, rename, or delete profiles; each profile owns its tab set |
-| **Menu-bar icon** | Pending/completed status across profiles; open a profile/tab or quit |
+| **Menu-bar icon** | Pending/completed status across profiles; **Show Overlay**, open a profile/tab, or quit |
 | **Tab strip** | Switch between independent RPC sessions; **＋** opens a new tab |
 | **Cmd + V** | Paste at the caret (leading/trailing newlines are trimmed) |
 | **Cmd + C / X / A** | Copy, cut, select all in the pending line |
@@ -101,7 +98,7 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 | **Arrows / click / drag** | Move the caret, place it with the mouse, or select text |
 | **Backspace** | Delete the character or selection before the caret |
 | **▾ / ▴** in the tab strip | Minimize the overlay to just the tabs / restore it |
-| **⤢ / ⤡** | Maximize to the screen's visible area (keeps the menu bar) / restore the overlay |
+| **👁 (hide)** | Hide the window only; reopen it with **Show Overlay** from the menu-bar icon |
 | **Cmd + M** | Same as **▾ / ▴** |
 | **Drag edge or corner** | Resize the overlay; the size is remembered (the Response panel takes extra height while open) |
 | **×** | Close the overlay |
