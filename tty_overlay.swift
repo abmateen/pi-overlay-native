@@ -382,7 +382,7 @@ final class OverlayContainerView: NSView {
 
 /// Prompt text box. A real `NSTextView` inside a scroll view supplies the native
 /// caret, selection, arrow keys, mouse placement, cut/copy/paste and undo; this
-/// view only draws the white rounded background, the placeholder, and the
+/// view only draws the black rounded background, the placeholder, and the
 /// agent-status pill in the band along the bottom edge.
 final class KeyTapeView: NSView, NSTextViewDelegate {
     enum AgentStatus {
@@ -392,7 +392,12 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
     }
 
     static let font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
-    static let textColor = NSColor(white: 0.13, alpha: 1)
+    /// Dark box, light text.
+    static let background = NSColor.black
+    static let textColor = NSColor.white
+    static let borderColor = NSColor(white: 0.35, alpha: 1)
+    static let placeholderColor = NSColor(white: 0.55, alpha: 1)
+    static let selectionColor = NSColor(white: 0.30, alpha: 1)
     static var paragraphStyle: NSParagraphStyle {
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = .byWordWrapping
@@ -458,6 +463,10 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
             .font: Self.font,
             .foregroundColor: Self.textColor,
         ]
+        textView.selectedTextAttributes = [
+            .backgroundColor: Self.selectionColor,
+            .foregroundColor: Self.textColor,
+        ]
         textView.defaultParagraphStyle = Self.paragraphStyle
         textView.smartInsertDeleteEnabled = false
         textView.isAutomaticQuoteSubstitutionEnabled = false
@@ -474,6 +483,8 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
 
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
+        // Dark scrollers to match the box, so the knob is visible on black.
+        scrollView.appearance = NSAppearance(named: .darkAqua)
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
         scrollView.verticalScrollElasticity = .none
@@ -566,11 +577,11 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // normal textbox look: white background, subtle border
-        NSColor.white.setFill()
+        // dark textbox: black fill, subtle border
+        Self.background.setFill()
         dirtyRect.fill()
 
-        NSColor(white: 0.82, alpha: 1).setStroke()
+        Self.borderColor.setStroke()
         let border = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6)
         border.lineWidth = 1
         border.stroke()
@@ -580,7 +591,7 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
             let area = textArea
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: Self.font,
-                .foregroundColor: NSColor(white: 0.35, alpha: 1),
+                .foregroundColor: Self.placeholderColor,
                 .paragraphStyle: Self.paragraphStyle,
             ]
             NSGraphicsContext.saveGraphicsState()
@@ -628,7 +639,7 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
         ]
         let pill = statusPillRect
 
-        NSColor(white: 0.97, alpha: 1).setFill()
+        NSColor(white: 0.18, alpha: 1).setFill()
         NSBezierPath(roundedRect: pill, xRadius: 6, yRadius: 6).fill()
         label.draw(at: NSPoint(x: pill.minX + 6, y: pill.minY + 3), withAttributes: attrs)
     }
@@ -2077,8 +2088,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         voiceButton.wantsLayer = true
         voiceButton.layer?.cornerRadius = 5
         voiceButton.layer?.borderWidth = 0.5
-        voiceButton.layer?.borderColor = NSColor(white: 0.78, alpha: 0.95).cgColor
-        voiceButton.layer?.backgroundColor = NSColor(white: 0.96, alpha: 1).cgColor
+        voiceButton.layer?.borderColor = NSColor(white: 0.35, alpha: 0.95).cgColor
+        voiceButton.layer?.backgroundColor = NSColor(white: 0.16, alpha: 1).cgColor
         voiceButton.imagePosition = .imageOnly
         voiceButton.imageScaling = .scaleProportionallyDown
         voiceButton.symbolConfiguration = NSImage.SymbolConfiguration(
@@ -2288,7 +2299,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             systemSymbolName: listening ? "waveform" : "mic.fill",
             accessibilityDescription: "Speak"
         )
-        voiceButton.contentTintColor = listening ? .systemRed : .secondaryLabelColor
+        voiceButton.contentTintColor = listening ? .systemRed : NSColor(white: 0.88, alpha: 1)
         voiceButton.toolTip = listening
             ? "Stop listening (Option+V)"
             : "Speak (Option+V)"
