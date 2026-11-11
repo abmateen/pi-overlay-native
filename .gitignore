@@ -2,3 +2,4 @@ tty_overlay_native
 build/
 .DS_Store
 *.log
+_CodeSignature/

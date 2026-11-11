@@ -47,6 +47,94 @@ function sendEvent(event: unknown): void {
 	}
 }
 
+function textFromContent(content: unknown): string {
+	if (typeof content === "string") return content.trim();
+	if (!Array.isArray(content)) return "";
+	return content
+		.map((block) => {
+			if (
+				block &&
+				typeof block === "object" &&
+				(block as { type?: string }).type === "text" &&
+				typeof (block as { text?: string }).text === "string"
+			) {
+				return (block as { text: string }).text;
+			}
+			return "";
+		})
+		.join("")
+		.trim();
+}
+
+/** Last assistant answer on the active branch, for populating the overlay on load. */
+function lastAssistantFromSession(ctx: ExtensionContext): string {
+	try {
+		const entries = ctx.sessionManager.getBranch();
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const entry = entries[i];
+			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
+			const text = textFromContent(entry.message.content);
+			if (text) return text;
+		}
+	} catch {
+		// session manager may not be readable mid-switch
+	}
+	return "";
+}
+
+interface OverlayQuery {
+	id: string;
+	prompt: string;
+	answer: string;
+}
+
+/** Pairs each user prompt on the active branch with the answer that followed. */
+function queriesFromSession(ctx: ExtensionContext): OverlayQuery[] {
+	let entries: ReturnType<ExtensionContext["sessionManager"]["getBranch"]>;
+	try {
+		entries = ctx.sessionManager.getBranch();
+	} catch {
+		return [];
+	}
+
+	const queries: OverlayQuery[] = [];
+	let current: OverlayQuery | undefined;
+
+	for (let i = 0; i < entries.length; i++) {
+		const entry = entries[i];
+		if (entry.type !== "message") continue;
+		const message = entry.message;
+
+		if (message.role === "user") {
+			const prompt = textFromContent(message.content);
+			const stamp = (message as { timestamp?: number }).timestamp;
+			current = {
+				id: stamp !== undefined ? String(stamp) : `user-${i}`,
+				prompt: prompt || "(image prompt)",
+				answer: "",
+			};
+			queries.push(current);
+		} else if (message.role === "assistant" && current) {
+			const answer = textFromContent(message.content);
+			if (answer) current.answer = answer;
+		}
+	}
+
+	return queries;
+}
+
+function sendQueries(ctx: ExtensionContext): void {
+	sendEvent({ type: "queries", items: queriesFromSession(ctx) });
+}
+
+/**
+ * `message_end` fires before pi appends the message to the session, so defer
+ * the read by a tick to include the prompt or answer that just finished.
+ */
+function queueQueries(ctx: ExtensionContext): void {
+	setTimeout(() => sendQueries(ctx), 0);
+}
+
 function killExisting(ttyPath: string): void {
 	try {
 		execFileSync("pkill", ["-f", `[t]ty_overlay_native .*--tty ${ttyPath}`], {
@@ -87,7 +175,6 @@ function startOverlay(ctx: ExtensionContext): boolean {
 
 	killExisting(ttyPath);
 	stopOverlay();
-	lastAssistantText = "";
 
 	try {
 		// Do not detach: the child must inherit pi's session/controlling TTY
@@ -110,6 +197,15 @@ function startOverlay(ctx: ExtensionContext): boolean {
 
 		overlay = child;
 		overlayTty = ttyPath;
+
+		// Populate the response panel and prompt history from the current
+		// session right away.
+		lastAssistantText = lastAssistantFromSession(ctx);
+		if (lastAssistantText) {
+			sendEvent({ type: "response", text: lastAssistantText });
+		}
+		sendQueries(ctx);
+
 		ctx.ui.notify(`TTY overlay started for ${ttyPath}.`, "info");
 		return true;
 	} catch (error) {
@@ -138,12 +234,21 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	pi.on("message_end", (event) => {
-		if (event.message.role !== "assistant") return;
-		lastAssistantText = event.message.content
-			.map((block) => (block.type === "text" ? block.text : ""))
-			.join("")
-			.trim();
+	pi.on("session_start", (_event, ctx) => {
+		lastAssistantText = lastAssistantFromSession(ctx);
+		sendEvent({ type: "response", text: lastAssistantText });
+		sendQueries(ctx);
+	});
+
+	pi.on("message_end", (event, ctx) => {
+		if (event.message.role === "assistant") {
+			lastAssistantText = textFromContent(event.message.content);
+		}
+		// Show a new prompt in the dropdown as soon as it is persisted.
+		// Answers can wait for agent_settled, which sends a fresh list.
+		if (event.message.role === "user") {
+			queueQueries(ctx);
+		}
 	});
 
 	pi.on("agent_start", () => {
@@ -151,12 +256,17 @@ export default function (pi: ExtensionAPI) {
 		sendEvent({ type: "status", value: "processing" });
 	});
 
-	pi.on("agent_settled", () => {
+	pi.on("agent_settled", (_event, ctx) => {
 		sendEvent({ type: "status", value: "done" });
 		sendEvent({ type: "response", text: lastAssistantText });
+		sendQueries(ctx);
 	});
 
-	pi.on("session_shutdown", () => {
-		stopOverlay();
+	pi.on("session_shutdown", (event) => {
+		// The overlay belongs to the terminal, not to one conversation. Keep it
+		// alive across new/resume/fork so the next session_start can reseed it.
+		if (event.reason === "quit" || event.reason === "reload") {
+			stopOverlay();
+		}
 	});
 }
