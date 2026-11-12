@@ -192,6 +192,57 @@ final class ChipLabel: NSTextField {
     }
 }
 
+/// Small translucent caption used above the compact capsule to name the
+/// profile and tab that the textbox will send to.
+final class PillCaption: NSTextField {
+    var symbolName: String?
+
+    override func draw(_ dirtyRect: NSRect) {
+        let text = stringValue
+        guard !text.isEmpty else { return }
+
+        let font = Theme.font(11, .medium)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.white.withAlphaComponent(0.92),
+            .paragraphStyle: paragraph,
+        ]
+        let textSize = (text as NSString).size(withAttributes: attrs)
+        let iconWidth: CGFloat = symbolName == nil ? 0 : 17
+        let width = min(bounds.width, textSize.width + iconWidth + 22)
+        let pill = NSRect(x: 0, y: (bounds.height - 22) / 2, width: width, height: 22)
+        NSColor(calibratedWhite: 0.02, alpha: 0.55).setFill()
+        Theme.rounded(pill, 11).fill()
+
+        var x: CGFloat = 10
+        if let symbolName,
+           let symbol = Theme.symbol(
+                symbolName,
+                size: 10,
+                color: NSColor.white.withAlphaComponent(0.85)
+           ) {
+            symbol.draw(in: NSRect(
+                x: x,
+                y: (bounds.height - symbol.size.height) / 2,
+                width: symbol.size.width,
+                height: symbol.size.height
+            ))
+            x += symbol.size.width + 5
+        }
+        (text as NSString).draw(
+            in: NSRect(
+                x: x,
+                y: (bounds.height - textSize.height) / 2,
+                width: max(8, width - x - 9),
+                height: textSize.height
+            ),
+            withAttributes: attrs
+        )
+    }
+}
+
 /// Popup button drawn as a rounded white field with an SF Symbol and a
 /// chevron. `NSPopUpButton` still owns the menu and the title/selection API.
 final class ThemedPopUpButton: NSPopUpButton {
@@ -2938,7 +2989,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let hideButton: IconButton
     let compactButton: IconButton
     let compactRestoreButton: IconButton
+    let compactHideButton: IconButton
     let compactPidLabel: NSTextField
+    let compactContextLabel: PillCaption
     let compactBackdrop: NSVisualEffectView
     let panelButton: IconButton
     let terminalButton: IconButton
@@ -3359,6 +3412,21 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         compactRestoreButton.layer?.cornerRadius = 13
         compactRestoreButton.isHidden = true
         container.addSubview(compactRestoreButton)
+        compactHideButton = IconButton(
+            symbol: "eye.slash",
+            size: 12,
+            tint: NSColor.white,
+            tooltip: "Hide the overlay — reopen it from the menu-bar icon"
+        )
+        compactHideButton.hoverFill = NSColor.black.withAlphaComponent(0.85)
+        compactHideButton.baseFill = NSColor.black.withAlphaComponent(0.55)
+        compactHideButton.layer?.cornerRadius = 13
+        compactHideButton.isHidden = true
+        container.addSubview(compactHideButton)
+        compactContextLabel = PillCaption(labelWithString: "")
+        compactContextLabel.symbolName = "person.fill"
+        compactContextLabel.isHidden = true
+        container.addSubview(compactContextLabel)
         compactPidLabel = NSTextField(labelWithString: "")
         compactPidLabel.font = Theme.mono(11, .medium)
         compactPidLabel.textColor = NSColor(calibratedWhite: 0.62, alpha: 1)
@@ -3544,6 +3612,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         compactButton.action = #selector(toggleCompact)
         compactRestoreButton.target = self
         compactRestoreButton.action = #selector(toggleCompact)
+        compactHideButton.target = self
+        compactHideButton.action = #selector(hideOverlay)
         panelButton.target = self
         panelButton.action = #selector(toggleResponse)
         responseCopyButton.target = self
@@ -7337,6 +7407,31 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             height: 26
         )
         compactRestoreButton.isHidden = false
+        compactHideButton.frame = NSRect(
+            x: compactRestoreButton.frame.minX - 6 - 26,
+            y: compactRestoreButton.frame.minY,
+            width: 26,
+            height: 26
+        )
+        compactHideButton.isHidden = false
+
+        if mode == .selfHost {
+            let tabName = activeRpcTab?.displayName ?? "New Tab"
+            compactContextLabel.stringValue = "\(activeProfileName) · \(tabName)"
+            compactContextLabel.isHidden = false
+        } else {
+            compactContextLabel.stringValue = ""
+            compactContextLabel.isHidden = true
+        }
+        compactContextLabel.frame = NSRect(
+            x: keyTape.frame.minX + 4,
+            y: capsuleHeight + 4,
+            width: max(
+                80,
+                compactHideButton.frame.minX - 8 - (keyTape.frame.minX + 4)
+            ),
+            height: 20
+        )
 
         keyTape.needsDisplay = true
         keyTape.needsLayout = true
@@ -7405,7 +7500,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         compactRestoreButton.isHidden = true
+        compactHideButton.isHidden = true
         compactPidLabel.isHidden = true
+        compactContextLabel.isHidden = true
         compactBackdrop.isHidden = true
         keyTape.isCompact = false
         voiceButton.layer?.cornerRadius = 10
@@ -7733,6 +7830,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         profileMenu.addItem(profileHeader)
         profilePopup.menu = profileMenu
         profilePopup.title = "localllm"
+        activeProfileName = "localllm"
         responseText = tab.responseText
         responseExpanded = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_RESPONSE"] == "1"
         responseUserCollapsed = !responseExpanded

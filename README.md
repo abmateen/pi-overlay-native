@@ -35,11 +35,14 @@ the folder/model controls.
 
 The **⤡** button in the top-right cluster hides the whole interface except one
 capsule-shaped prompt on a transparent window: mic, text, `pi`/`ssh` pid, and
-the Send/Cancel pill. A small **⤢** button above the capsule's right end brings
-the full overlay back. The capsule opens bottom-centre on the current screen,
-with a 28 pt gap above the Dock/screen edge, and returns to the previous window
-frame when you restore. Enter sends, Shift+Enter inserts a newline, Esc cancels
-the running turn, and the pi sessions, tabs and prompt keep running normally.
+the Send/Cancel pill. Above the capsule's right end sit an **eye** button (hide
+the overlay; reopen it from the menu-bar icon) and a **⤢** button that brings the
+full overlay back. A small translucent caption above the capsule names the
+profile and tab the prompt will go to (e.g. `localllm · pi-overlay`). The
+capsule opens bottom-centre on the current screen, with a 28 pt gap above the
+Dock/screen edge, and returns to the previous window frame when you restore.
+Enter sends, Shift+Enter inserts a newline, Esc cancels the running turn, and
+the pi sessions, tabs and prompt keep running normally.
 Drag the transparent strip above the capsule (or the capsule background) to
 move it.
 
