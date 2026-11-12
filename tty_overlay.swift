@@ -3,6 +3,7 @@ import AVFoundation
 import Darwin
 import Foundation
 import Speech
+import UniformTypeIdentifiers
 import WebKit
 
 // ---------------------------------------------------------------------------
@@ -30,6 +31,304 @@ func debugLog(_ message: String) {
 signal(SIGTTOU, SIG_IGN)
 signal(SIGTTIN, SIG_IGN)
 signal(SIGPIPE, SIG_IGN)
+
+// ---------------------------------------------------------------------------
+// Theme
+// ---------------------------------------------------------------------------
+
+/// Single source of truth for the overlay's look. The palette follows the
+/// light card design: white rounded card, lavender-free neutral surfaces,
+/// near-black input, purple accent.
+enum Theme {
+    static let card = NSColor(calibratedWhite: 1.0, alpha: 1)
+    static let tabStrip = NSColor(calibratedWhite: 1.0, alpha: 1)
+    static let text = NSColor(calibratedRed: 0.07, green: 0.07, blue: 0.09, alpha: 1)
+    static let textSecondary = NSColor(calibratedRed: 0.42, green: 0.42, blue: 0.48, alpha: 1)
+    static let textTertiary = NSColor(calibratedWhite: 0.62, alpha: 1)
+    static let border = NSColor(calibratedRed: 0.90, green: 0.90, blue: 0.93, alpha: 1)
+    static let borderStrong = NSColor(calibratedRed: 0.82, green: 0.82, blue: 0.86, alpha: 1)
+    static let field = NSColor(calibratedWhite: 1.0, alpha: 1)
+    static let fieldAlt = NSColor(calibratedRed: 0.955, green: 0.955, blue: 0.972, alpha: 1)
+    static let fieldHover = NSColor(calibratedRed: 0.94, green: 0.94, blue: 0.96, alpha: 1)
+
+    static let accent = NSColor(calibratedRed: 0.49, green: 0.36, blue: 1.0, alpha: 1)   // #7C5CFF
+    static let accentSoft = NSColor(calibratedRed: 0.92, green: 0.89, blue: 1.0, alpha: 1)
+    static let accentText = NSColor.white
+
+    static let ok = NSColor(calibratedRed: 0.16, green: 0.60, blue: 0.35, alpha: 1)
+    static let okFill = NSColor(calibratedRed: 0.87, green: 0.95, blue: 0.89, alpha: 1)
+    static let warn = NSColor(calibratedRed: 0.93, green: 0.57, blue: 0.10, alpha: 1)
+    static let warnFill = NSColor(calibratedRed: 0.99, green: 0.95, blue: 0.87, alpha: 1)
+    static let bad = NSColor(calibratedRed: 0.85, green: 0.22, blue: 0.24, alpha: 1)
+    static let badFill = NSColor(calibratedRed: 0.99, green: 0.90, blue: 0.90, alpha: 1)
+
+    static let input = NSColor(calibratedRed: 0.050, green: 0.050, blue: 0.062, alpha: 1)
+    static let inputRaised = NSColor(calibratedRed: 0.115, green: 0.115, blue: 0.135, alpha: 1)
+    static let inputBorder = NSColor(calibratedRed: 0.17, green: 0.17, blue: 0.19, alpha: 1)
+    static let inputText = NSColor(calibratedRed: 0.95, green: 0.95, blue: 0.96, alpha: 1)
+    static let inputMuted = NSColor(calibratedRed: 0.50, green: 0.50, blue: 0.55, alpha: 1)
+
+    static let tabStripHeight: CGFloat = 56
+    static let controlHeight: CGFloat = 34
+    static let fieldRadius: CGFloat = 9
+    static let inputRadius: CGFloat = 16
+    static let responseRadius: CGFloat = 12
+
+    static func font(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
+        NSFont.systemFont(ofSize: size, weight: weight)
+    }
+
+    static func mono(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
+        NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+    }
+
+    static func rounded(_ rect: NSRect, _ radius: CGFloat) -> NSBezierPath {
+        NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
+    }
+
+    /// SF Symbol tinted through a palette configuration (macOS 12+).
+    static func symbol(
+        _ name: String,
+        size: CGFloat,
+        weight: NSFont.Weight = .semibold,
+        color: NSColor
+    ) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
+            return nil
+        }
+        let config = NSImage.SymbolConfiguration(pointSize: size, weight: weight)
+            .applying(NSImage.SymbolConfiguration(paletteColors: [color]))
+        return base.withSymbolConfiguration(config)
+    }
+
+    struct PillTone {
+        let fill: NSColor
+        let dot: NSColor
+    }
+
+    static func tone(for status: String) -> PillTone {
+        let value = status.uppercased()
+        let badWords = [
+            "ERROR", "FAILED", "EXITED", "MISSING", "DENIED", "BUSY", "CANCELED",
+            "CANCELLED", "NO ", "UNAVAILABLE",
+        ]
+        if badWords.contains(where: { value.contains($0) }) {
+            return PillTone(fill: badFill, dot: bad)
+        }
+        if value.contains("READY") || value.contains("DONE") {
+            return PillTone(fill: okFill, dot: ok)
+        }
+        let busyWords = [
+            "PROCESS", "START", "CONNECT", "SWITCH", "SEND", "CHOOSE", "SELECT",
+            "LOADING", "RESTART",
+        ]
+        if busyWords.contains(where: { value.contains($0) }) {
+            return PillTone(fill: warnFill, dot: warn)
+        }
+        return PillTone(fill: fieldAlt, dot: textTertiary)
+    }
+}
+
+/// Header status chip. Keeps `stringValue` / `textColor` (the controller sets
+/// those in dozens of places) but draws a rounded pill with a status dot.
+final class StatusPillLabel: NSTextField {
+    override func draw(_ dirtyRect: NSRect) {
+        let text = stringValue
+        guard !text.isEmpty else { return }
+
+        let font = Theme.font(12, .semibold)
+        let tone = Theme.tone(for: text)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: tone.dot,
+        ]
+        let textSize = (text as NSString).size(withAttributes: attrs)
+        let width = min(bounds.width, max(54, textSize.width + 34))
+        let pill = NSRect(x: 0, y: (bounds.height - 26) / 2, width: width, height: 26)
+        tone.fill.setFill()
+        Theme.rounded(pill, 8).fill()
+
+        tone.dot.setFill()
+        NSBezierPath(ovalIn: NSRect(x: 11, y: pill.midY - 4, width: 8, height: 8)).fill()
+
+        (text as NSString).draw(
+            at: NSPoint(
+                x: 25,
+                y: pill.minY + (pill.height - textSize.height) / 2
+            ),
+            withAttributes: attrs
+        )
+    }
+}
+
+/// Neutral rounded chip for the pid / remote host label.
+final class ChipLabel: NSTextField {
+    var symbolName: String?
+
+    override func draw(_ dirtyRect: NSRect) {
+        let text = stringValue
+        guard !text.isEmpty else { return }
+
+        Theme.fieldAlt.setFill()
+        Theme.rounded(bounds, 8).fill()
+
+        let font = Theme.mono(10, .medium)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: Theme.textSecondary,
+        ]
+        var x: CGFloat = 9
+        if let symbolName,
+           let symbol = Theme.symbol(symbolName, size: 10, weight: .medium, color: Theme.textTertiary) {
+            symbol.draw(in: NSRect(x: x, y: (bounds.height - symbol.size.height) / 2,
+                                   width: symbol.size.width, height: symbol.size.height))
+            x += symbol.size.width + 6
+        }
+        let textSize = (text as NSString).size(withAttributes: attrs)
+        (text as NSString).draw(
+            at: NSPoint(x: x, y: (bounds.height - textSize.height) / 2),
+            withAttributes: attrs
+        )
+    }
+}
+
+/// Popup button drawn as a rounded white field with an SF Symbol and a
+/// chevron. `NSPopUpButton` still owns the menu and the title/selection API.
+final class ThemedPopUpButton: NSPopUpButton {
+    var symbolName: String?
+    var symbolTint: NSColor = Theme.textSecondary
+    var titleFont: NSFont = Theme.font(12, .medium)
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = Theme.rounded(rect, Theme.fieldRadius)
+
+        (isEnabled ? Theme.field : Theme.fieldAlt).setFill()
+        path.fill()
+        (isHighlighted ? Theme.borderStrong : Theme.border).setStroke()
+        path.lineWidth = 1
+        path.stroke()
+
+        var x: CGFloat = 11
+        if let symbolName,
+           let symbol = Theme.symbol(
+                symbolName,
+                size: 12,
+                color: isEnabled ? symbolTint : Theme.textTertiary
+           ) {
+            symbol.draw(in: NSRect(
+                x: x,
+                y: (bounds.height - symbol.size.height) / 2,
+                width: symbol.size.width,
+                height: symbol.size.height
+            ))
+            x += symbol.size.width + 7
+        }
+
+        let chevronWidth: CGFloat = 20
+        let textRect = NSRect(
+            x: x,
+            y: (bounds.height - 17) / 2,
+            width: max(8, bounds.width - x - chevronWidth - 6),
+            height: 17
+        )
+        let raw = title
+            .replacingOccurrences(of: "📁 ", with: "")
+            .replacingOccurrences(of: "👤 ", with: "")
+            .replacingOccurrences(of: "☁ ", with: "☁ ")
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        (raw as NSString).draw(
+            in: textRect,
+            withAttributes: [
+                .font: titleFont,
+                .foregroundColor: isEnabled ? Theme.text : Theme.textTertiary,
+                .paragraphStyle: paragraph,
+            ]
+        )
+
+        if let chevron = Theme.symbol("chevron.down", size: 10, color: Theme.textTertiary) {
+            chevron.draw(in: NSRect(
+                x: bounds.width - chevron.size.width - 9,
+                y: (bounds.height - chevron.size.height) / 2,
+                width: chevron.size.width,
+                height: chevron.size.height
+            ))
+        }
+    }
+}
+
+/// Flat SF Symbol button used by the tab strip and the response row.
+final class IconButton: NSButton {
+    var symbolName: String = "circle"
+    var symbolSize: CGFloat = 14
+    var symbolTint: NSColor = Theme.textSecondary
+    var hoverFill: NSColor = Theme.fieldAlt
+
+    convenience init(
+        symbol: String,
+        size: CGFloat = 14,
+        tint: NSColor = Theme.textSecondary,
+        tooltip: String? = nil
+    ) {
+        self.init(frame: .zero)
+        symbolName = symbol
+        symbolSize = size
+        symbolTint = tint
+        isBordered = false
+        imagePosition = .imageOnly
+        imageScaling = .scaleProportionallyDown
+        wantsLayer = true
+        layer?.cornerRadius = 7
+        setSymbol(symbol, size: size, tint: tint)
+        toolTip = tooltip
+    }
+
+    func setSymbol(_ name: String, size: CGFloat? = nil, tint: NSColor? = nil) {
+        symbolName = name
+        if let size { symbolSize = size }
+        if let tint { symbolTint = tint }
+        image = Theme.symbol(name, size: symbolSize, weight: .medium, color: symbolTint)
+        contentTintColor = symbolTint
+    }
+
+    override func updateLayer() {
+        super.updateLayer()
+        layer?.backgroundColor = isHighlighted
+            ? hoverFill.cgColor
+            : NSColor.clear.cgColor
+    }
+}
+
+/// Filled pill button used for Send and the small attachment chip.
+final class PillButton: NSButton {
+    var fillColor: NSColor = Theme.accent
+    var textColor: NSColor = Theme.accentText
+
+    override func draw(_ dirtyRect: NSRect) {
+        fillColor.setFill()
+        Theme.rounded(bounds, bounds.height / 2).fill()
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingTail
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font ?? Theme.font(12, .semibold),
+            .foregroundColor: textColor,
+            .paragraphStyle: paragraph,
+        ]
+        let textSize = (title as NSString).size(withAttributes: attrs)
+        (title as NSString).draw(
+            in: NSRect(
+                x: 10,
+                y: (bounds.height - textSize.height) / 2,
+                width: max(10, bounds.width - 20),
+                height: textSize.height
+            ),
+            withAttributes: attrs
+        )
+    }
+}
 
 enum Mode {
     case dry
@@ -391,13 +690,13 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
         case done
     }
 
-    static let font = NSFont.monospacedSystemFont(ofSize: 15, weight: .regular)
+    static let font = Theme.font(16, .regular)
     /// Dark box, light text.
-    static let background = NSColor.black
-    static let textColor = NSColor.white
-    static let borderColor = NSColor(white: 0.35, alpha: 1)
-    static let placeholderColor = NSColor(white: 0.55, alpha: 1)
-    static let selectionColor = NSColor(white: 0.30, alpha: 1)
+    static let background = Theme.input
+    static let textColor = Theme.inputText
+    static let borderColor = Theme.inputBorder
+    static let placeholderColor = Theme.inputMuted
+    static let selectionColor = Theme.accent.withAlphaComponent(0.35)
     static var paragraphStyle: NSParagraphStyle {
         let para = NSMutableParagraphStyle()
         para.lineBreakMode = .byWordWrapping
@@ -407,7 +706,7 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
 
     /// Height of the strip along the bottom edge reserved for the Speak button
     /// and the status pill, so wrapped text never runs underneath them.
-    static let bottomBand: CGFloat = 44
+    static let bottomBand: CGFloat = 58
     private static let textInset = NSSize(width: 10, height: 8)
 
     weak var controller: OverlayController? {
@@ -415,6 +714,8 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
     }
 
     var agentStatus: AgentStatus = .idle
+    /// Space reserved on the right of the bottom band for the Send button.
+    var statusRightInset: CGFloat = 18
 
     let scrollView: NSScrollView
     let textView: OverlayTextView
@@ -458,7 +759,7 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
         textView.textContainer?.widthTracksTextView = true
         textView.font = Self.font
         textView.textColor = Self.textColor
-        textView.insertionPointColor = Self.textColor
+        textView.insertionPointColor = Theme.accent
         textView.typingAttributes = [
             .font: Self.font,
             .foregroundColor: Self.textColor,
@@ -577,12 +878,18 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        // dark textbox: black fill, subtle border
+        // Dark input card: large radius, near-black fill, hairline border.
+        NSGraphicsContext.saveGraphicsState()
+        Theme.rounded(bounds, Theme.inputRadius).addClip()
         Self.background.setFill()
         dirtyRect.fill()
+        NSGraphicsContext.restoreGraphicsState()
 
         Self.borderColor.setStroke()
-        let border = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6)
+        let border = Theme.rounded(
+            bounds.insetBy(dx: 0.5, dy: 0.5),
+            Theme.inputRadius
+        )
         border.lineWidth = 1
         border.stroke()
 
@@ -616,32 +923,32 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
     /// Bottom-right status pill in this view's (flipped) coordinates. When
     /// idle, the "Done" geometry is returned so the Speak button stays put.
     var statusPillRect: NSRect {
-        let label = agentStatus == .processing ? "Processing" : "Done"
-        let font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        let label = agentStatus == .processing ? "●  Processing" : "✓  Done"
+        let font = Theme.font(11, .semibold)
         let size = (label as NSString).size(withAttributes: [.font: font])
         return NSRect(
-            x: bounds.width - size.width - 18,
-            y: bounds.height - size.height - 10,
-            width: size.width + 12,
-            height: size.height + 6
+            x: bounds.width - statusRightInset - size.width - 18,
+            y: bounds.height - size.height - 22,
+            width: size.width + 18,
+            height: size.height + 10
         )
     }
 
     private func drawAgentStatus() {
         guard agentStatus != .idle else { return }
 
-        let label = agentStatus == .processing ? "Processing" : "Done"
-        let color = agentStatus == .processing ? NSColor.systemOrange : NSColor.systemGreen
-        let font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        let label = agentStatus == .processing ? "●  Processing" : "✓  Done"
+        let font = Theme.font(11, .semibold)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: color,
+            .foregroundColor: agentStatus == .processing ? Theme.warn : Theme.accentText,
         ]
         let pill = statusPillRect
 
-        NSColor(white: 0.18, alpha: 1).setFill()
-        NSBezierPath(roundedRect: pill, xRadius: 6, yRadius: 6).fill()
-        label.draw(at: NSPoint(x: pill.minX + 6, y: pill.minY + 3), withAttributes: attrs)
+        let fill = agentStatus == .processing ? Theme.inputRaised : Theme.accent
+        fill.setFill()
+        Theme.rounded(pill, pill.height / 2).fill()
+        label.draw(at: NSPoint(x: pill.minX + 9, y: pill.minY + 5), withAttributes: attrs)
     }
 }
 
@@ -2291,12 +2598,15 @@ final class RpcSession {
     }
 
     @discardableResult
-    func prompt(_ message: String) -> Bool {
+    func prompt(_ message: String, images: [[String: Any]] = []) -> Bool {
         var record: [String: Any] = [
             "id": nextID(),
             "type": "prompt",
             "message": message,
         ]
+        if !images.isEmpty {
+            record["images"] = images
+        }
         if isStreaming || waitingForFirstEvent {
             record["streamingBehavior"] = "followUp"
         }
@@ -2550,15 +2860,29 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let profilePopup: NSPopUpButton
     let tabScrollView: NSScrollView
     let tabContentView: NSView
-    let newTabButton: NSButton
+    let newTabButton: IconButton
     let voiceButton: NSButton
-    let closeButton: NSButton
-    let minimizeButton: NSButton
-    let hideButton: NSButton
+    let imageButton: IconButton
+    let attachButton: IconButton
+    let sendButton: PillButton
+    let attachmentChip: PillButton
+    let closeButton: IconButton
+    let minimizeButton: IconButton
+    let hideButton: IconButton
+    let panelButton: IconButton
+    let terminalButton: IconButton
+    let topDivider: NSView
+    let tabSeparator: NSView
+    let sessionIcon: NSImageView
     let sessionPopup: NSPopUpButton
-    let newSessionButton: NSButton
+    let newSessionButton: IconButton
     let sessionLabel: NSTextField
+    let headerDivider: NSView
     let responseButton: NSButton
+    let responseDivider: NSView
+    let responseCopyButton: IconButton
+    let responseDownloadButton: IconButton
+    let responseExpandButton: IconButton
     let responseWebView: WKWebView
     let queryPopup: NSPopUpButton
 
@@ -2569,6 +2893,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private var selectedQueryID: String?
     /// Latest assistant text in modes without per-tab state (tty/extension).
     private var latestResponseText = ""
+    /// Images picked with the photo button, sent with the next prompt (RPC
+    /// mode only). Cleared after a send or when switching tabs.
+    private var pendingImages: [[String: Any]] = []
+    private var pendingImageNames: [String] = []
 
     private let speech = SpeechInput()
     private var voiceBase = ""
@@ -2638,14 +2966,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private var expandedHeight: CGFloat = 0
     private var sessionInfos: [PiSessionInfo] = []
     private var sessionLoadToken = 0
+    /// Width of the rendered tab strip, used to keep the + next to the tabs.
+    private var tabContentWidth: CGFloat = 0
     private var statusItem: NSStatusItem?
 
     /// Height of the window when collapsed. RPC mode keeps only the tab strip;
     /// the other modes keep their single header row, which carries the button.
-    private var collapsedHeight: CGFloat { mode == .selfHost ? 32 : 44 }
+    private var collapsedHeight: CGFloat { mode == .selfHost ? Theme.tabStripHeight : 44 }
 
     private var baseMinSize: NSSize {
-        NSSize(width: 720, height: mode == .selfHost ? 200 : 170)
+        NSSize(width: 720, height: mode == .selfHost ? 320 : 210)
     }
 
     /// Window height the overlay opens at: the default for a fresh launch and
@@ -2684,10 +3014,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             width: min(900, max(720, visible.width - 40)),
             height: min(
                 Self.defaultWindowHeight,
-                max(mode == .selfHost ? 200 : 170, visible.height - 40)
+                max(mode == .selfHost ? 320 : 210, visible.height - 40)
             )
         )
-        let initialTabExtra: CGFloat = mode == .selfHost ? 30 : 0
+        let initialTabExtra: CGFloat = mode == .selfHost ? Theme.tabStripHeight : 0
         let origin = NSPoint(
             x: max(20, visible.midX - size.width / 2),
             y: visible.minY + 12
@@ -2700,12 +3030,13 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             defer: false
         )
         window.level = .floating
+        window.appearance = NSAppearance(named: .aqua)
         window.isOpaque = false
         window.backgroundColor = .clear
         window.hasShadow = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isMovableByWindowBackground = true
-        window.minSize = NSSize(width: 720, height: mode == .selfHost ? 200 : 170)
+        window.minSize = NSSize(width: 720, height: mode == .selfHost ? 320 : 210)
         window.title = selfMode
             ? "pi · \(initialDirectory.lastPathComponent)"
             : "TTY Overlay · \(ttyPath ?? "dry")"
@@ -2746,23 +3077,23 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         // container
         let container = OverlayContainerView(frame: NSRect(origin: .zero, size: window.contentRect(forFrameRect: window.frame).size))
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.white.cgColor
-        container.layer?.cornerRadius = 10
+        container.layer?.backgroundColor = Theme.card.cgColor
+        container.layer?.cornerRadius = 18
         container.layer?.masksToBounds = true
-        container.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.45).cgColor
-        container.layer?.borderWidth = 1.4
+        container.layer?.borderColor = Theme.border.cgColor
+        container.layer?.borderWidth = 1
         window.contentView = container
 
         // status label
-        statusLabel = NSTextField(labelWithString: "READY")
-        statusLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        statusLabel = StatusPillLabel(labelWithString: "READY")
+        statusLabel.font = Theme.font(12, .semibold)
         statusLabel.textColor = .systemGreen
         statusLabel.frame = NSRect(x: 16, y: size.height - initialTabExtra - 26, width: 250, height: 20)
         container.addSubview(statusLabel)
 
         targetLabel = NSTextField(labelWithString: ttyPath.map { "TTY \($0)" }
             ?? (selfMode ? "STARTING PI…" : "DRY RUN"))
-        targetLabel.font = NSFont.monospacedSystemFont(ofSize: 10, weight: .regular)
+        targetLabel.font = Theme.mono(10, .regular)
         targetLabel.textColor = NSColor.systemGray
         targetLabel.frame = NSRect(x: 138, y: size.height - initialTabExtra - 25, width: 180, height: 18)
         container.addSubview(targetLabel)
@@ -2778,36 +3109,42 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         container.addSubview(terminalTitleLabel)
 
         // Directory dropdown (self mode only)
-        directoryPopup = NSPopUpButton(
+        let directoryButton = ThemedPopUpButton(
             frame: NSRect(x: 138, y: size.height - initialTabExtra - 28, width: 300, height: 24),
             pullsDown: true
         )
-        directoryPopup.bezelStyle = .rounded
+        directoryButton.symbolName = "folder.fill"
+        directoryButton.symbolTint = NSColor(calibratedRed: 0.20, green: 0.47, blue: 0.93, alpha: 1)
+        directoryButton.titleFont = Theme.font(12, .semibold)
+        directoryPopup = directoryButton
         directoryPopup.controlSize = .regular
-        directoryPopup.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         directoryPopup.title = "📁 \(initialDirectory.lastPathComponent)"
         directoryPopup.toolTip = initialDirectory.path
         directoryPopup.isHidden = !selfMode
         container.addSubview(directoryPopup)
 
         // pi RPC child PID (self/RPC mode only)
-        pidLabel = NSTextField(labelWithString: "")
-        pidLabel.font = NSFont.monospacedSystemFont(ofSize: 9, weight: .regular)
-        pidLabel.textColor = NSColor.secondaryLabelColor
-        pidLabel.alignment = .right
+        let chip = ChipLabel(labelWithString: "")
+        chip.symbolName = "cpu"
+        pidLabel = chip
+        pidLabel.font = Theme.mono(10, .medium)
+        pidLabel.textColor = Theme.textSecondary
+        pidLabel.alignment = .left
         pidLabel.lineBreakMode = .byTruncatingHead
         pidLabel.isSelectable = true
         pidLabel.isHidden = mode != .selfHost
         container.addSubview(pidLabel)
 
         // Model dropdown (RPC self mode only)
-        modelPopup = NSPopUpButton(
+        let modelButton = ThemedPopUpButton(
             frame: NSRect(x: 446, y: size.height - initialTabExtra - 28, width: 184, height: 24),
             pullsDown: false
         )
-        modelPopup.bezelStyle = .rounded
+        modelButton.symbolName = "square.stack.3d.up.fill"
+        modelButton.symbolTint = NSColor(calibratedRed: 0.35, green: 0.40, blue: 0.85, alpha: 1)
+        modelButton.titleFont = Theme.font(12, .medium)
+        modelPopup = modelButton
         modelPopup.controlSize = .regular
-        modelPopup.font = NSFont.systemFont(ofSize: 11, weight: .medium)
         modelPopup.addItem(withTitle: "Model…")
         modelPopup.isEnabled = false
         modelPopup.isHidden = mode != .selfHost
@@ -2816,16 +3153,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         // Saved sessions for this directory (RPC self mode only)
         sessionLabel = NSTextField(labelWithString: "Sessions")
-        sessionLabel.font = NSFont.systemFont(ofSize: 9, weight: .semibold)
-        sessionLabel.textColor = NSColor.tertiaryLabelColor
-        sessionLabel.alignment = .right
+        sessionLabel.font = Theme.font(12, .semibold)
+        sessionLabel.textColor = Theme.text
+        sessionLabel.alignment = .left
         sessionLabel.isHidden = mode != .selfHost
         container.addSubview(sessionLabel)
 
-        sessionPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        sessionPopup.bezelStyle = .rounded
+        let sessionsButton = ThemedPopUpButton(frame: .zero, pullsDown: false)
+        sessionsButton.titleFont = Theme.font(12, .medium)
+        sessionPopup = sessionsButton
         sessionPopup.controlSize = .regular
-        sessionPopup.font = NSFont.systemFont(ofSize: 10, weight: .medium)
         sessionPopup.addItem(withTitle: "Sessions")
         sessionPopup.isEnabled = false
         sessionPopup.toolTip = "Saved pi sessions for this folder"
@@ -2833,15 +3170,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         container.addSubview(sessionPopup)
 
         // Start a fresh session (same as pi's /new) next to the sessions list.
-        newSessionButton = NSButton(title: "＋", target: nil, action: nil)
-        newSessionButton.isBordered = false
-        newSessionButton.wantsLayer = true
-        newSessionButton.layer?.cornerRadius = 5
-        newSessionButton.layer?.borderWidth = 0.5
-        newSessionButton.layer?.borderColor = NSColor(white: 0.68, alpha: 0.95).cgColor
-        newSessionButton.layer?.backgroundColor = NSColor.white.cgColor
-        newSessionButton.font = NSFont.systemFont(ofSize: 14, weight: .semibold)
-        newSessionButton.toolTip = "New session (like /new)"
+        newSessionButton = IconButton(
+            symbol: "plus",
+            size: 15,
+            tint: Theme.textSecondary,
+            tooltip: "New session (like /new)"
+        )
+        newSessionButton.layer?.cornerRadius = Theme.fieldRadius
+        newSessionButton.layer?.borderWidth = 1
+        newSessionButton.layer?.borderColor = Theme.border.cgColor
+        newSessionButton.layer?.backgroundColor = Theme.field.cgColor
         newSessionButton.isHidden = mode != .selfHost
         newSessionButton.isEnabled = false
         container.addSubview(newSessionButton)
@@ -2849,20 +3187,27 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         // Tab strip (RPC self mode only)
         tabBar = NSView(frame: .zero)
         tabBar.wantsLayer = true
-        tabBar.layer?.backgroundColor = NSColor(white: 0.91, alpha: 1).cgColor
+        tabBar.layer?.backgroundColor = Theme.tabStrip.cgColor
         tabBar.isHidden = mode != .selfHost
         container.addSubview(tabBar)
 
+        tabSeparator = NSView(frame: .zero)
+        tabSeparator.wantsLayer = true
+        tabSeparator.layer?.backgroundColor = Theme.border.cgColor
+        tabBar.addSubview(tabSeparator)
+
         // Profile switcher: profiles are the parent of tabs and appear first in
         // the tab strip. The menu is rebuilt whenever the profile list changes.
-        profilePopup = NSPopUpButton(
+        let profileButton = ThemedPopUpButton(
             frame: NSRect(x: 4, y: 1, width: 140, height: 24),
             pullsDown: true
         )
-        profilePopup.bezelStyle = .rounded
+        profileButton.symbolName = "person.fill"
+        profileButton.symbolTint = NSColor(calibratedRed: 0.20, green: 0.47, blue: 0.93, alpha: 1)
+        profileButton.titleFont = Theme.font(12, .semibold)
+        profilePopup = profileButton
         profilePopup.controlSize = .regular
-        profilePopup.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
-        profilePopup.title = "👤 \(ProfileStore.defaultName)"
+        profilePopup.title = ProfileStore.defaultName
         profilePopup.toolTip = "Profile — its tabs are shown to the right"
         profilePopup.isHidden = mode != .selfHost
         tabBar.addSubview(profilePopup)
@@ -2875,124 +3220,181 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         tabScrollView.autohidesScrollers = true
         tabBar.addSubview(tabScrollView)
 
-        tabContentView = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 24))
+        tabContentView = NSView(frame: NSRect(x: 0, y: 0, width: 1, height: 34))
         tabScrollView.documentView = tabContentView
 
-        newTabButton = NSButton(title: "＋", target: nil, action: nil)
-        newTabButton.isBordered = false
-        newTabButton.wantsLayer = true
-        newTabButton.layer?.cornerRadius = 6
-        newTabButton.font = NSFont.systemFont(ofSize: 16, weight: .medium)
-        newTabButton.contentTintColor = .secondaryLabelColor
-        newTabButton.toolTip = "New tab (Ctrl+T)"
+        newTabButton = IconButton(
+            symbol: "plus",
+            size: 16,
+            tint: Theme.textSecondary,
+            tooltip: "New tab (Ctrl+T)"
+        )
         newTabButton.isHidden = mode != .selfHost
         tabBar.addSubview(newTabButton)
 
-        // Speak button (voice input): lives inside the textbox, bottom right,
-        // immediately before the Processing/Done pill.
+        // Top-right icon cluster. In self mode these live in the tab strip so
+        // they stay reachable when the overlay is collapsed.
+        terminalButton = IconButton(
+            symbol: "terminal",
+            size: 14,
+            tint: Theme.textSecondary,
+            tooltip: "Diagnostics — debug log, profiles.conf, agent directory"
+        )
+        panelButton = IconButton(
+            symbol: "sidebar.right",
+            size: 14,
+            tint: Theme.textSecondary,
+            tooltip: "Toggle the Response panel"
+        )
+        hideButton = IconButton(
+            symbol: "eye.slash",
+            size: 14,
+            tint: Theme.textSecondary,
+            tooltip: "Hide the overlay — reopen it from the menu-bar icon"
+        )
+        hideButton.setAccessibilityLabel("Hide overlay")
+        minimizeButton = IconButton(
+            symbol: "chevron.down",
+            size: 14,
+            tint: Theme.textSecondary,
+            tooltip: "Minimize to the tab strip (Cmd+M)"
+        )
+        closeButton = IconButton(
+            symbol: "xmark",
+            size: 14,
+            tint: Theme.textSecondary,
+            tooltip: "Close overlay"
+        )
+        for button in [terminalButton, panelButton, hideButton, minimizeButton, closeButton] {
+            container.addSubview(button)
+        }
+
+        // Speak / image / attach buttons live inside the dark input card.
         voiceButton = NSButton(title: "", target: nil, action: nil)
         voiceButton.isBordered = false
         voiceButton.wantsLayer = true
-        voiceButton.layer?.cornerRadius = 5
-        voiceButton.layer?.borderWidth = 0.5
-        voiceButton.layer?.borderColor = NSColor(white: 0.35, alpha: 0.95).cgColor
-        voiceButton.layer?.backgroundColor = NSColor(white: 0.16, alpha: 1).cgColor
+        voiceButton.layer?.cornerRadius = 10
+        voiceButton.layer?.borderWidth = 1
+        voiceButton.layer?.borderColor = Theme.inputBorder.cgColor
+        voiceButton.layer?.backgroundColor = Theme.inputRaised.cgColor
         voiceButton.imagePosition = .imageOnly
         voiceButton.imageScaling = .scaleProportionallyDown
-        voiceButton.symbolConfiguration = NSImage.SymbolConfiguration(
-            pointSize: 12,
-            weight: .semibold
-        )
-        voiceButton.frame = NSRect(x: 0, y: 0, width: 22, height: 22)
+        voiceButton.frame = NSRect(x: 0, y: 0, width: 34, height: 34)
         voiceButton.toolTip = "Speak (Option+V)"
 
-        // close application button, to the right of the collapse button
-        closeButton = NSButton(title: "×", target: nil, action: nil)
-        closeButton.isBordered = false
-        closeButton.wantsLayer = true
-        closeButton.layer?.cornerRadius = 6
-        closeButton.layer?.borderWidth = 0.5
-        closeButton.layer?.borderColor = NSColor(white: 0.68, alpha: 0.95).cgColor
-        closeButton.layer?.backgroundColor = NSColor.white.cgColor
-        closeButton.font = NSFont.systemFont(ofSize: 14, weight: .bold)
-        closeButton.frame = NSRect(x: size.width - 36, y: size.height - initialTabExtra - 28, width: 28, height: 24)
-        container.addSubview(closeButton)
-
-        // minimize/restore: collapses the window down to the tab strip
-        minimizeButton = NSButton(title: "", target: nil, action: nil)
-        minimizeButton.isBordered = false
-        minimizeButton.wantsLayer = true
-        minimizeButton.layer?.cornerRadius = 6
-        minimizeButton.layer?.borderWidth = 0.5
-        minimizeButton.layer?.borderColor = NSColor(white: 0.68, alpha: 0.95).cgColor
-        minimizeButton.layer?.backgroundColor = NSColor.white.cgColor
-        minimizeButton.imagePosition = .imageOnly
-        minimizeButton.imageScaling = .scaleProportionallyDown
-        minimizeButton.contentTintColor = .labelColor
-        minimizeButton.symbolConfiguration = NSImage.SymbolConfiguration(
-            pointSize: 15,
-            weight: .bold
+        imageButton = IconButton(
+            symbol: "photo",
+            size: 15,
+            tint: Theme.inputText,
+            tooltip: "Attach an image to the next prompt"
         )
-        minimizeButton.toolTip = "Minimize to the tab strip (Cmd+M)"
-        container.addSubview(minimizeButton)
-
-        // hide: orders the window out without touching its size or the pi
-        // children; the menu-bar icon brings it back.
-        hideButton = NSButton(title: "", target: nil, action: nil)
-        hideButton.isBordered = false
-        hideButton.wantsLayer = true
-        hideButton.layer?.cornerRadius = 6
-        hideButton.layer?.borderWidth = 0.5
-        hideButton.layer?.borderColor = NSColor(white: 0.68, alpha: 0.95).cgColor
-        hideButton.layer?.backgroundColor = NSColor.white.cgColor
-        hideButton.imagePosition = .imageOnly
-        hideButton.imageScaling = .scaleProportionallyDown
-        hideButton.contentTintColor = .labelColor
-        hideButton.symbolConfiguration = NSImage.SymbolConfiguration(
-            pointSize: 13,
-            weight: .semibold
+        imageButton.hoverFill = Theme.inputRaised
+        attachButton = IconButton(
+            symbol: "paperclip",
+            size: 15,
+            tint: Theme.inputText,
+            tooltip: "Insert a file path into the prompt"
         )
-        if let image = NSImage(
-            systemSymbolName: "eye.slash",
-            accessibilityDescription: "Hide overlay"
-        ) {
-            hideButton.image = image
-        } else {
-            hideButton.title = "–"
-        }
-        hideButton.toolTip = "Hide the overlay — reopen it from the menu-bar icon"
-        hideButton.setAccessibilityLabel("Hide overlay")
-        container.addSubview(hideButton)
+        attachButton.hoverFill = Theme.inputRaised
+
+        sendButton = PillButton(title: "⌘ ↵   Send", target: nil, action: nil)
+        sendButton.fillColor = Theme.inputRaised
+        sendButton.textColor = Theme.inputText
+        sendButton.font = Theme.font(12, .semibold)
+        sendButton.toolTip = "Send the prompt (Return)"
+
+        attachmentChip = PillButton(title: "", target: nil, action: nil)
+        attachmentChip.fillColor = Theme.inputRaised
+        attachmentChip.textColor = Theme.inputMuted
+        attachmentChip.font = Theme.font(10, .medium)
+        attachmentChip.toolTip = "Clear attached images"
+        attachmentChip.isHidden = true
 
         // key tape
         keyTape = KeyTapeView(frame: NSRect(x: 10, y: 10, width: size.width - 20, height: 120))
         keyTape.wantsLayer = true
-        keyTape.layer?.cornerRadius = 8
+        keyTape.layer?.cornerRadius = Theme.inputRadius
+        keyTape.layer?.masksToBounds = true
         keyTape.addSubview(voiceButton)
+        keyTape.addSubview(imageButton)
+        keyTape.addSubview(attachButton)
+        keyTape.addSubview(sendButton)
+        keyTape.addSubview(attachmentChip)
         container.addSubview(keyTape)
 
         // Collapsible final-response panel under the key tape.
-        responseButton = NSButton(title: "Response ▸", target: nil, action: nil)
+        responseButton = NSButton(title: "▸  Response", target: nil, action: nil)
         responseButton.isBordered = false
-        responseButton.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        responseButton.contentTintColor = NSColor.secondaryLabelColor
+        responseButton.font = Theme.font(12, .semibold)
+        responseButton.contentTintColor = Theme.text
         responseButton.alignment = .left
         responseButton.isHidden = true
         container.addSubview(responseButton)
 
+        responseDivider = NSView(frame: .zero)
+        responseDivider.wantsLayer = true
+        responseDivider.layer?.backgroundColor = Theme.border.cgColor
+        responseDivider.isHidden = true
+        container.addSubview(responseDivider)
+
         // Prompt history: pick a previous question to see the answer that
         // followed it. Sits between the textbox and the response panel.
-        queryPopup = NSPopUpButton(frame: .zero, pullsDown: false)
-        queryPopup.bezelStyle = .rounded
+        let historyButton = ThemedPopUpButton(frame: .zero, pullsDown: false)
+        historyButton.titleFont = Theme.font(12, .regular)
+        queryPopup = historyButton
         queryPopup.controlSize = .regular
-        queryPopup.font = NSFont.systemFont(ofSize: 11, weight: .regular)
         queryPopup.addItem(withTitle: "Latest answer")
         queryPopup.isHidden = true
         queryPopup.isEnabled = false
         queryPopup.toolTip = "Show the answer for a previous prompt in this session"
         container.addSubview(queryPopup)
 
+        responseCopyButton = IconButton(
+            symbol: "doc.on.doc",
+            size: 13,
+            tint: Theme.textSecondary,
+            tooltip: "Copy the response"
+        )
+        responseDownloadButton = IconButton(
+            symbol: "arrow.down.to.line",
+            size: 13,
+            tint: Theme.textSecondary,
+            tooltip: "Save the response as Markdown"
+        )
+        responseExpandButton = IconButton(
+            symbol: "arrow.up.left.and.arrow.down.right",
+            size: 13,
+            tint: Theme.textSecondary,
+            tooltip: "Expand or collapse the response panel"
+        )
+        for button in [responseCopyButton, responseDownloadButton, responseExpandButton] {
+            button.isHidden = true
+            container.addSubview(button)
+        }
+
+        sessionIcon = NSImageView(frame: .zero)
+        sessionIcon.image = Theme.symbol("bubble.left", size: 15, color: Theme.textSecondary)
+        sessionIcon.imageScaling = .scaleProportionallyDown
+        sessionIcon.isHidden = mode != .selfHost
+        container.addSubview(sessionIcon)
+
+        headerDivider = NSView(frame: .zero)
+        headerDivider.wantsLayer = true
+        headerDivider.layer?.backgroundColor = Theme.border.cgColor
+        headerDivider.isHidden = mode != .selfHost
+        container.addSubview(headerDivider)
+
+        topDivider = NSView(frame: .zero)
+        topDivider.wantsLayer = true
+        topDivider.layer?.backgroundColor = Theme.border.cgColor
+        container.addSubview(topDivider)
+
         responseWebView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        responseWebView.wantsLayer = true
+        responseWebView.layer?.cornerRadius = Theme.responseRadius
+        responseWebView.layer?.borderWidth = 1
+        responseWebView.layer?.borderColor = Theme.border.cgColor
+        responseWebView.layer?.masksToBounds = true
         responseWebView.isHidden = true
         container.addSubview(responseWebView)
 
@@ -3005,6 +3407,24 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         voiceButton.action = #selector(toggleVoice)
         voiceButton.sendAction(on: [.leftMouseDown])
         updateVoiceButton(listening: false)
+        imageButton.target = self
+        imageButton.action = #selector(attachImage)
+        attachButton.target = self
+        attachButton.action = #selector(attachFiles)
+        sendButton.target = self
+        sendButton.action = #selector(sendFromButton)
+        attachmentChip.target = self
+        attachmentChip.action = #selector(clearAttachments)
+        terminalButton.target = self
+        terminalButton.action = #selector(showDiagnosticsMenu(_:))
+        panelButton.target = self
+        panelButton.action = #selector(toggleResponse)
+        responseCopyButton.target = self
+        responseCopyButton.action = #selector(copyResponse)
+        responseDownloadButton.target = self
+        responseDownloadButton.action = #selector(downloadResponse)
+        responseExpandButton.target = self
+        responseExpandButton.action = #selector(toggleResponse)
         closeButton.target = self
         closeButton.action = #selector(closeApp)
         closeButton.sendAction(on: [.leftMouseDown])
@@ -3320,7 +3740,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         menu.addItem(delete)
 
         profilePopup.menu = menu
-        profilePopup.title = "👤 \(activeProfileName)"
+        profilePopup.title = activeProfileName
         profilePopup.toolTip = "Profile: \(activeProfileName) — its tabs are shown to the right"
         updateStatusItem()
     }
@@ -4179,7 +4599,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         tabContentView.subviews.forEach { $0.removeFromSuperview() }
 
-        let font = NSFont.systemFont(ofSize: 10, weight: .medium)
+        let font = Theme.font(12, .medium)
+        let activeFont = Theme.font(12, .semibold)
         let attrs: [NSAttributedString.Key: Any] = [.font: font]
         var x: CGFloat = 0
         var activeOrigin: CGFloat = 0
@@ -4188,9 +4609,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             let parts = tabTitleParts(tab)
             let title = tabTitle(tab)
             let width = min(
-                220,
-                max(96, (title as NSString).size(withAttributes: attrs).width + 40)
+                240,
+                max(112, (title as NSString).size(withAttributes: attrs).width + 56)
             )
+            let isActive = tab.id == activeRpcTabID
             let button = NSButton(
                 title: title,
                 target: self,
@@ -4199,27 +4621,23 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             button.tag = index
             button.isBordered = false
             button.wantsLayer = true
-            button.layer?.cornerRadius = 6
-            button.layer?.borderWidth = 0.5
-            button.layer?.borderColor = NSColor(white: 0.76, alpha: 0.8).cgColor
-            button.layer?.backgroundColor = (tab.id == activeRpcTabID
-                ? NSColor.white
-                : NSColor(white: 0.84, alpha: 1)).cgColor
+            button.layer?.cornerRadius = 9
+            button.layer?.borderWidth = isActive ? 1 : 0
+            button.layer?.borderColor = Theme.border.cgColor
+            button.layer?.backgroundColor = (isActive
+                ? Theme.field
+                : Theme.fieldAlt).cgColor
             button.alignment = .center
             button.toolTip = tab.fullLocation.isEmpty ? "No project selected" : tab.fullLocation
-            button.frame = NSRect(x: x, y: 1, width: width, height: 26)
-            let titleColor = tab.id == activeRpcTabID
-                ? NSColor.labelColor
-                : NSColor.secondaryLabelColor
+            button.frame = NSRect(x: x, y: 1, width: width, height: 32)
+            let titleColor = isActive ? Theme.text : Theme.textSecondary
             let paragraph = NSMutableParagraphStyle()
             paragraph.alignment = .center
-            paragraph.tailIndent = -22
+            paragraph.tailIndent = -24
             let attributed = NSMutableAttributedString(
                 string: title,
                 attributes: [
-                    .font: tab.id == activeRpcTabID
-                        ? NSFont.systemFont(ofSize: 10, weight: .semibold)
-                        : font,
+                    .font: isActive ? activeFont : font,
                     .foregroundColor: titleColor,
                     .paragraphStyle: paragraph,
                 ]
@@ -4243,20 +4661,21 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             close.tag = index
             close.isBordered = false
             close.wantsLayer = true
-            close.layer?.cornerRadius = 3
-            close.font = NSFont.systemFont(ofSize: 11, weight: .medium)
-            close.contentTintColor = .secondaryLabelColor
+            close.layer?.cornerRadius = 4
+            close.font = Theme.font(12, .medium)
+            close.contentTintColor = Theme.textTertiary
             close.toolTip = "Close tab (Ctrl+W)"
-            close.frame = NSRect(x: x + width - 20, y: 5, width: 14, height: 18)
+            close.frame = NSRect(x: x + width - 24, y: 7, width: 16, height: 20)
             tabContentView.addSubview(close)
 
-            if tab.id == activeRpcTabID {
+            if isActive {
                 activeOrigin = x
             }
             x += width + 6
         }
 
-        tabContentView.frame = NSRect(x: 0, y: 0, width: max(1, x), height: 26)
+        tabContentWidth = max(1, x)
+        tabContentView.frame = NSRect(x: 0, y: 0, width: tabContentWidth, height: 34)
 
         let visibleWidth = tabScrollView.contentSize.width
         let maxScroll = max(0, x - visibleWidth)
@@ -4607,6 +5026,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             saveActiveTabState()
             activeRpcTabID = tab.id
             loadTabState(tab)
+            clearAttachments()
         }
         if let directory = tab.directory {
             activeDirectory = directory
@@ -5567,7 +5987,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 statusLabel.textColor = .systemRed
                 return false
             }
-            guard session.prompt(text) else {
+            guard session.prompt(text, images: pendingImages) else {
                 statusLabel.stringValue = "SEND ERROR"
                 statusLabel.textColor = .systemRed
                 return false
@@ -5576,6 +5996,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tab.status = .processing
             tab.rawText = ""
             tab.tape = []
+            clearAttachments()
             // A new question returns the viewer to the latest answer; the
             // prompt itself appears in the dropdown via message_end.
             tab.selectedQueryID = nil
@@ -5669,26 +6090,26 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         <meta charset="utf-8">
         <style>
         :root { color-scheme: light; }
-        html, body { margin: 0; padding: 0; background: #ffffff; color: #111827; }
-        body { font: 13px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
-        #content { padding: 10px 12px 14px; }
-        h1, h2, h3, h4 { margin: 0.75em 0 0.35em; line-height: 1.2; color: #0f172a; }
-        h1 { font-size: 1.45em; }
-        h2 { font-size: 1.25em; }
-        h3 { font-size: 1.1em; }
-        p { margin: 0.5em 0; line-height: 1.5; }
-        ul, ol { margin: 0.5em 0; padding-left: 1.5em; }
-        li { margin: 0.15em 0; }
-        table { border-collapse: collapse; width: 100%; margin: 0.65em 0; font-size: 12px; }
-        th, td { border: 1px solid #dbe3ee; padding: 5px 7px; text-align: left; vertical-align: top; }
-        th { background: #f1f5f9; font-weight: 600; }
-        code { font-family: ui-monospace, Menlo, monospace; background: #f3f4f6; padding: 1px 4px; border-radius: 4px; }
-        pre { background: #0f172a; color: #e5e7eb; padding: 10px 12px; border-radius: 8px; overflow: auto; }
+        html, body { margin: 0; padding: 0; background: #fbfbfd; color: #18181b; }
+        body { font: 13.5px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif; }
+        #content { padding: 16px 18px 20px; }
+        h1, h2, h3, h4 { margin: 0.8em 0 0.4em; line-height: 1.25; color: #101014; letter-spacing: -0.01em; }
+        h1 { font-size: 1.5em; }
+        h2 { font-size: 1.28em; }
+        h3 { font-size: 1.12em; }
+        p { margin: 0.55em 0; line-height: 1.55; }
+        ul, ol { margin: 0.55em 0; padding-left: 1.5em; }
+        li { margin: 0.18em 0; line-height: 1.5; }
+        table { border-collapse: collapse; width: 100%; margin: 0.7em 0; font-size: 12.5px; }
+        th, td { border: 1px solid #e4e4ea; padding: 6px 8px; text-align: left; vertical-align: top; }
+        th { background: #f4f4f7; font-weight: 600; }
+        code { font-family: ui-monospace, Menlo, monospace; background: #f1f1f5; padding: 1.5px 5px; border-radius: 5px; }
+        pre { background: #0e0e12; color: #f2f2f5; padding: 12px 14px; border-radius: 10px; overflow: auto; }
         pre code { background: none; padding: 0; color: inherit; }
-        blockquote { margin: 0.6em 0; padding: 0.1em 0.8em; border-left: 3px solid #cbd5e1; color: #475569; }
-        a { color: #2563eb; text-decoration: none; }
+        blockquote { margin: 0.7em 0; padding: 0.15em 0.9em; border-left: 3px solid #ddddE6; color: #5c5c66; }
+        a { color: #6b4eff; text-decoration: none; }
         a:hover { text-decoration: underline; }
-        hr { border: none; border-top: 1px solid #e2e8f0; margin: 0.9em 0; }
+        hr { border: none; border-top: 1px solid #e8e8ee; margin: 1em 0; }
         </style>
         <script>\(js)</script>
         </head>
@@ -5843,28 +6264,214 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     private func updateResponseButton() {
-        responseButton.isHidden = isMinimized || responseText.isEmpty
-        responseButton.title = responseExpanded ? "Response ▾" : "Response ▸"
+        let visible = !isMinimized && !responseText.isEmpty
+        responseButton.isHidden = !visible
+        responseButton.title = responseExpanded ? "▾  Response" : "▸  Response"
+        responseDivider.isHidden = !visible
+        responseCopyButton.isHidden = !visible
+        responseDownloadButton.isHidden = !visible
+        responseExpandButton.isHidden = !visible
+        responseCopyButton.isEnabled = visible && !responseText.isEmpty
+        responseDownloadButton.isEnabled = visible && !responseText.isEmpty
+        responseExpandButton.isEnabled = visible
     }
 
     private func updateMinimizeButton() {
         let symbol = isMinimized ? "chevron.up" : "chevron.down"
         let description = isMinimized ? "Restore overlay" : "Minimize overlay"
-        if let image = NSImage(
-            systemSymbolName: symbol,
-            accessibilityDescription: description
-        ) {
-            minimizeButton.image = image
-            minimizeButton.title = ""
-        } else {
-            // Fallback for a missing SF Symbol: keep a visible text chevron.
-            minimizeButton.image = nil
+        minimizeButton.setSymbol(symbol, size: 14, tint: Theme.textSecondary)
+        if minimizeButton.image == nil {
             minimizeButton.title = isMinimized ? "▴" : "▾"
+        } else {
+            minimizeButton.title = ""
         }
         minimizeButton.toolTip = isMinimized
             ? "Restore the overlay (Cmd+M)"
             : "Minimize to the tab strip (Cmd+M)"
         minimizeButton.setAccessibilityLabel(description)
+    }
+
+    // MARK: - Attachments and response actions
+
+    @objc private func sendFromButton() {
+        sendPrompt()
+    }
+
+    @objc private func attachImage() {
+        guard mode == .selfHost else { return }
+        if isMinimized { toggleMinimize() }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.png, .jpeg, .gif, .webP, .heic]
+        panel.message = "Pick images to send with the next prompt."
+        panel.prompt = "Attach"
+        NSApp.activate(ignoringOtherApps: true)
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK else { return }
+            for url in panel.urls {
+                guard let data = try? Data(contentsOf: url) else { continue }
+                let mime: String
+                switch url.pathExtension.lowercased() {
+                case "png": mime = "image/png"
+                case "jpg", "jpeg": mime = "image/jpeg"
+                case "gif": mime = "image/gif"
+                case "webp": mime = "image/webp"
+                default: continue
+                }
+                self.pendingImages.append([
+                    "type": "image",
+                    "data": data.base64EncodedString(),
+                    "mimeType": mime,
+                ])
+                self.pendingImageNames.append(url.lastPathComponent)
+            }
+            self.updateAttachmentChip()
+            self.focusOverlay()
+        }
+    }
+
+    @objc private func attachFiles() {
+        guard mode == .selfHost else { return }
+        if isMinimized { toggleMinimize() }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.message = "Insert the selected file paths into the prompt."
+        panel.prompt = "Insert"
+        NSApp.activate(ignoringOtherApps: true)
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK else { return }
+            let paths = panel.urls.map { url -> String in
+                url.path.contains(" ") ? "\"\(url.path)\"" : url.path
+            }
+            guard !paths.isEmpty else { return }
+            let addition = paths.joined(separator: " ")
+            if self.keyTape.text.isEmpty {
+                self.keyTape.insert(addition)
+            } else {
+                self.keyTape.insert(" " + addition)
+            }
+            self.rawText = self.keyTape.text
+            self.focusOverlay()
+        }
+    }
+
+    @objc private func clearAttachments() {
+        pendingImages.removeAll()
+        pendingImageNames.removeAll()
+        updateAttachmentChip()
+    }
+
+    private func updateAttachmentChip() {
+        let count = pendingImages.count
+        attachmentChip.isHidden = count == 0
+        if count == 0 {
+            imageButton.setSymbol("photo", size: 15, tint: Theme.inputText)
+            attachmentChip.title = ""
+        } else {
+            imageButton.setSymbol("photo.fill", size: 15, tint: Theme.accent)
+            attachmentChip.title = count == 1 ? "1 image  ×" : "\(count) images  ×"
+        }
+        layoutViews()
+    }
+
+    @objc private func showDiagnosticsMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        let log = NSMenuItem(title: "Show debug log", action: #selector(openDebugLog), keyEquivalent: "")
+        log.target = self
+        menu.addItem(log)
+        let profiles = NSMenuItem(title: "Open profiles.conf", action: #selector(openProfilesConf), keyEquivalent: "")
+        profiles.target = self
+        menu.addItem(profiles)
+        let agent = NSMenuItem(title: "Open pi agent folder", action: #selector(openPiAgentFolder), keyEquivalent: "")
+        agent.target = self
+        menu.addItem(agent)
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: 0), in: sender)
+    }
+
+    @objc private func openDebugLog() {
+        let url = URL(fileURLWithPath: "/tmp/tty_overlay_swift.log")
+        if FileManager.default.fileExists(atPath: url.path) {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openProfilesConf() {
+        let url = profileStore.url
+        if !FileManager.default.fileExists(atPath: url.path) {
+            try? FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            FileManager.default.createFile(atPath: url.path, contents: Data())
+        }
+        NSWorkspace.shared.open(url)
+    }
+
+    @objc private func openPiAgentFolder() {
+        NSWorkspace.shared.open(
+            URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".pi/agent")
+        )
+    }
+
+    @objc private func copyResponse() {
+        let text: String
+        if mode == .selfHost, let tab = activeRpcTab {
+            text = tab.responseText
+        } else {
+            text = responseText
+        }
+        guard !text.isEmpty else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        flashStatus("COPIED", tone: .ok)
+    }
+
+    @objc private func downloadResponse() {
+        let text: String
+        if mode == .selfHost, let tab = activeRpcTab {
+            text = tab.responseText
+        } else {
+            text = responseText
+        }
+        guard !text.isEmpty else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = "response.md"
+        panel.allowedContentTypes = [
+            UTType(filenameExtension: "md") ?? .plainText,
+            .plainText,
+        ]
+        panel.message = "Save the current response."
+        panel.prompt = "Save"
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .OK, let url = panel.url else { return }
+            do {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+                self.flashStatus("SAVED", tone: .ok)
+            } catch {
+                self.flashStatus("SAVE ERROR", tone: .bad)
+            }
+        }
+    }
+
+    private enum FlashTone { case ok, warn, bad }
+
+    /// Shows a short confirmation in the header pill, then restores the idle
+    /// status for the active tab.
+    private func flashStatus(_ text: String, tone: FlashTone) {
+        statusLabel.stringValue = text
+        switch tone {
+        case .ok: statusLabel.textColor = .systemGreen
+        case .warn: statusLabel.textColor = .systemOrange
+        case .bad: statusLabel.textColor = .systemRed
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) { [weak self] in
+            self?.showIdleStatus()
+        }
     }
 
     /// Hides the window without closing it: the pi children, tabs and prompt
@@ -6031,23 +6638,23 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         layoutViews()
     }
 
-    private static let responsePanelHeight: CGFloat = 160
+    private static let responsePanelHeight: CGFloat = 180
 
     /// Height the key tape keeps while the response panel is open. Extra
     /// window height from scaling the overlay goes to the response panel
     /// instead of stretching the textbox.
-    private static let keyTapeBaseHeight: CGFloat = 128
+    private static let keyTapeBaseHeight: CGFloat = 150
 
     /// Height at which the key tape keeps its normal size with the response
     /// panel open. Growing to this once (instead of on every toggle) keeps the
     /// window size predictable and avoids drift between launches.
     private var comfortableHeight: CGFloat {
-        (mode == .selfHost ? 258 : 198) + Self.responsePanelHeight
+        (mode == .selfHost ? 430 : 360) + Self.responsePanelHeight
     }
 
     /// Height reserved under the header row for the saved-session list.
-    private static let sessionRowHeight: CGFloat = 24
-    private var sessionRowExtra: CGFloat { mode == .selfHost ? 30 : 0 }
+    private static let sessionRowHeight: CGFloat = 34
+    private var sessionRowExtra: CGFloat { mode == .selfHost ? 44 : 0 }
 
     /// The user owns the window height. The only adjustment made here is to
     /// make room for the response panel when the window is too short for it.
@@ -6072,63 +6679,111 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         let width = container.bounds.width
         let height = container.bounds.height
-        let tabBarExtra: CGFloat = mode == .selfHost ? 30 : 0
+        let tabBarExtra: CGFloat = mode == .selfHost ? Theme.tabStripHeight : 0
         let headerBase = height - tabBarExtra
         // In RPC mode the collapsed window shows only the tab strip, so the
-        // header contents go away. The × and ▾ buttons stay in the tab strip.
+        // header contents go away. The window controls stay in the tab strip.
         let collapseHeader = isMinimized && mode == .selfHost
 
-        let textY: CGFloat = 8
+        let textY: CGFloat = 10
         let sessionRow = sessionRowExtra
         let responseVisible = responseExpanded && !isMinimized
-        let textHeight: CGFloat
+        let headerRowHeight: CGFloat = 34
+        let headerRowY = headerBase - 10 - headerRowHeight
+        let sessionRowHeight: CGFloat = 34
+        let sessionRowY = headerRowY - 10 - sessionRowHeight
+        let inputTop = sessionRow > 0 ? sessionRowY - 12 : headerRowY - 12
+        let responseRowHeight: CGFloat = 34
+
+        var textHeight: CGFloat = 0
         if responseVisible {
-            // Keep the textbox at its base height and give every extra point
-            // of window height to the Markdown response panel. The 28pt is the
-            // Response button row (4pt gap + 24pt button) between them.
-            let keyTop = headerBase - 34 - sessionRow
-            let verticalSpace = max(0, keyTop - textY)
-            textHeight = max(
-                Self.responsePanelHeight,
-                verticalSpace - 28 - Self.keyTapeBaseHeight
-            )
-        } else {
-            textHeight = 0
+            let available = max(0, inputTop - textY - responseRowHeight - 8)
+            textHeight = max(Self.responsePanelHeight, available - Self.keyTapeBaseHeight)
         }
-        let headerY = textY + textHeight + 4
-        let keyY = headerY + 24
+        let responseRowY = responseVisible ? textY + textHeight + 8 : textY
+        let keyY = responseRowY + responseRowHeight + 8
+        let keyHeight = max(96, inputTop - keyY)
 
-        let topRowY = height - 29
-        let headerRowY = headerBase - 28
-        // Right cluster is [▾] [hide] [×]. In RPC mode the window controls live
-        // in the tab strip so they stay reachable when collapsed.
-        let windowControlY = mode == .selfHost ? topRowY : headerRowY
-        statusLabel.frame = NSRect(x: 16, y: headerBase - 26, width: 120, height: 20)
-        closeButton.frame = NSRect(x: width - 36, y: windowControlY, width: 28, height: 24)
-        hideButton.frame = NSRect(x: width - 70, y: windowControlY, width: 28, height: 24)
-        minimizeButton.frame = NSRect(x: width - 104, y: windowControlY, width: 28, height: 24)
+        // MARK: Top bar (profile + tabs + window controls)
 
-        // Left edge of the right-hand control cluster, leaving room for the PID.
-        let controlsRight = width - 272
+        tabBar.frame = NSRect(
+            x: 0,
+            y: height - Theme.tabStripHeight,
+            width: width,
+            height: Theme.tabStripHeight
+        )
+        tabBar.isHidden = mode != .selfHost
+        tabSeparator.frame = NSRect(x: 0, y: 0, width: width, height: 1)
+
+        let iconSize: CGFloat = 30
+        let iconGap: CGFloat = 4
+        let iconCount = 5
+        let clusterWidth = CGFloat(iconCount) * iconSize + CGFloat(iconCount - 1) * iconGap
+        var iconX = width - 14 - clusterWidth
+        let iconY = height - Theme.tabStripHeight + (Theme.tabStripHeight - iconSize) / 2
+        for button in [terminalButton, panelButton, hideButton, minimizeButton, closeButton] {
+            button.frame = NSRect(x: iconX, y: iconY, width: iconSize, height: iconSize)
+            iconX += iconSize + iconGap
+        }
+        panelButton.isHidden = mode != .selfHost
+        terminalButton.isHidden = false
+        topDivider.isHidden = mode != .selfHost
+        topDivider.frame = NSRect(
+            x: hideButton.frame.minX - 8,
+            y: iconY + 6,
+            width: 1,
+            height: iconSize - 12
+        )
+
+        // These live inside tabBar, so their y coordinates are relative to it.
+        let topControlY: CGFloat = 11
+        profilePopup.frame = NSRect(x: 14, y: topControlY, width: 168, height: 34)
+        profilePopup.isHidden = mode != .selfHost
+
+        let rightmostPlusX = width - 14 - clusterWidth - 10 - 30
+        let plusX = min(rightmostPlusX, 190 + tabContentWidth + 8)
+        newTabButton.frame = NSRect(x: plusX, y: topControlY + 2, width: 30, height: 30)
+        newTabButton.isHidden = mode != .selfHost
+        tabScrollView.frame = NSRect(
+            x: 190,
+            y: topControlY,
+            width: max(40, plusX - 8 - 190),
+            height: 34
+        )
+
+        // MARK: Header row (status, folder, model, pid)
+
+        statusLabel.frame = NSRect(x: 16, y: headerRowY + 3, width: 132, height: 28)
+        let dividerX: CGFloat = 16 + 132 + 12
+        headerDivider.frame = NSRect(x: dividerX, y: headerRowY + 6, width: 1, height: 22)
+        let contentX: CGFloat = dividerX + 15
+        let pidWidth: CGFloat = 100
+        let pidX = width - 16 - pidWidth
+        let available: CGFloat = max(180, pidX - 10 - contentX)
+        let directoryWidth: CGFloat = max(150, min(available * 0.46, available - 140 - 8))
+        let modelWidth: CGFloat = max(120, available - directoryWidth - 8)
 
         if isSelfMode {
-            let middle = max(200, controlsRight - 138)
-            let dirWidth = max(110, middle * 0.5)
-            let modelWidth = max(130, middle - dirWidth - 8)
-            directoryPopup.frame = NSRect(x: 138, y: headerBase - 28, width: dirWidth, height: 24)
-            modelPopup.frame = NSRect(
-                x: 138 + dirWidth + 8,
-                y: headerBase - 28,
-                width: modelWidth,
-                height: 24
+            directoryPopup.frame = NSRect(
+                x: contentX,
+                y: headerRowY,
+                width: directoryWidth,
+                height: headerRowHeight
             )
-            pidLabel.frame = NSRect(x: controlsRight, y: headerBase - 25, width: 70, height: 18)
+            modelPopup.frame = NSRect(
+                x: contentX + directoryWidth + 8,
+                y: headerRowY,
+                width: modelWidth,
+                height: headerRowHeight
+            )
+            pidLabel.frame = NSRect(x: pidX, y: headerRowY + 8, width: pidWidth, height: 20)
         } else {
-            targetLabel.frame = NSRect(x: 138, y: headerBase - 25, width: 150, height: 18)
+            targetLabel.frame = NSRect(x: contentX - 8, y: headerRowY + 10, width: 150, height: 18)
+            let titleMaxX = width - 14 - clusterWidth - 8
             terminalTitleLabel.frame = NSRect(
-                x: 296,
-                y: headerBase - 24,
-                width: max(60, width - 236 - 296),
+                x: contentX + 142,
+                y: headerRowY + 11,
+                width: max(60, titleMaxX - (contentX + 142)),
                 height: 16
             )
         }
@@ -6137,111 +6792,121 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         directoryPopup.isHidden = !isSelfMode || collapseHeader
         modelPopup.isHidden = mode != .selfHost || collapseHeader
         pidLabel.isHidden = mode != .selfHost || collapseHeader
+        headerDivider.isHidden = !isSelfMode || collapseHeader
         statusLabel.isHidden = collapseHeader
         closeButton.isHidden = false
         hideButton.isHidden = false
+        minimizeButton.isHidden = false
 
         // The textbox is never visible while collapsed, but it stays in the
         // window (transparent, not hidden) so it remains first responder and
         // the Option/Ctrl/Cmd chords keep working.
         keyTape.alphaValue = isMinimized ? 0 : 1
 
-        // Saved sessions row, directly under the header row and above the
-        // textbox. Only RPC mode has one.
-        sessionLabel.isHidden = sessionRow == 0 || collapseHeader
-        sessionPopup.isHidden = sessionRow == 0 || collapseHeader
-        newSessionButton.isHidden = sessionRow == 0 || collapseHeader
-        if sessionRow > 0 {
-            let rowBottom = headerBase - 34 - Self.sessionRowHeight
-            sessionLabel.frame = NSRect(
-                x: 12,
-                y: rowBottom + Self.sessionRowHeight - 14,
-                width: 54,
-                height: 12
-            )
-            sessionPopup.frame = NSRect(
-                x: 70,
-                y: rowBottom,
-                width: min(max(200, width - 82), 420),
-                height: Self.sessionRowHeight
-            )
+        // MARK: Sessions row
+
+        let showSessionRow = sessionRow > 0 && !collapseHeader
+        sessionIcon.isHidden = !showSessionRow
+        sessionLabel.isHidden = !showSessionRow
+        sessionPopup.isHidden = !showSessionRow
+        newSessionButton.isHidden = !showSessionRow
+        if showSessionRow {
+            sessionIcon.frame = NSRect(x: 18, y: sessionRowY + 9, width: 18, height: 18)
+            sessionLabel.frame = NSRect(x: 42, y: sessionRowY + 9, width: 70, height: 18)
+            let plusSize: CGFloat = 34
             newSessionButton.frame = NSRect(
-                x: sessionPopup.frame.maxX + 6,
-                y: rowBottom,
-                width: 28,
-                height: Self.sessionRowHeight
+                x: width - 16 - plusSize,
+                y: sessionRowY,
+                width: plusSize,
+                height: plusSize
+            )
+            let popupX: CGFloat = 116
+            sessionPopup.frame = NSRect(
+                x: popupX,
+                y: sessionRowY,
+                width: max(120, newSessionButton.frame.minX - 8 - popupX),
+                height: sessionRowHeight
             )
         }
 
-        // With the response panel closed, the key tape is the flexible area.
-        // With it open, the panel has already taken the extra height above, so
-        // this settles at its base height.
-        let keyTop = headerBase - 34 - sessionRow
-        keyTape.frame = NSRect(x: 10, y: keyY, width: width - 20, height: max(56, keyTop - keyY))
+        // MARK: Input card
 
-        // Speak button: bottom-left inside the textbox, with a little padding.
-        let micSize: CGFloat = 22
-        voiceButton.frame = NSRect(
-            x: 12,
-            y: keyTape.bounds.height - micSize - 10,
-            width: micSize,
-            height: micSize
+        keyTape.frame = NSRect(x: 16, y: keyY, width: width - 32, height: keyHeight)
+
+        let buttonSize: CGFloat = 34
+        let bottomY = keyTape.bounds.height - buttonSize - 12
+        voiceButton.frame = NSRect(x: 16, y: bottomY, width: buttonSize, height: buttonSize)
+        imageButton.frame = NSRect(x: 58, y: bottomY, width: buttonSize, height: buttonSize)
+        attachButton.frame = NSRect(x: 100, y: bottomY, width: buttonSize, height: buttonSize)
+        imageButton.isHidden = mode != .selfHost
+        attachButton.isHidden = mode != .selfHost
+
+        let chipAttrs: [NSAttributedString.Key: Any] = [.font: Theme.font(10, .medium)]
+        let chipWidth = pendingImages.isEmpty
+            ? 0
+            : (attachmentChip.title as NSString).size(withAttributes: chipAttrs).width + 24
+        attachmentChip.frame = NSRect(x: 144, y: bottomY + 7, width: chipWidth, height: 20)
+        attachmentChip.isHidden = pendingImages.isEmpty || mode != .selfHost
+
+        let sendWidth: CGFloat = 108
+        sendButton.frame = NSRect(
+            x: keyTape.bounds.width - 16 - sendWidth,
+            y: bottomY,
+            width: sendWidth,
+            height: buttonSize
+        )
+        keyTape.statusRightInset = 16 + sendWidth + 12
+        keyTape.needsDisplay = true
+
+        // MARK: Response row
+
+        responseButton.frame = NSRect(x: 16, y: responseRowY + 4, width: 118, height: 26)
+        responseDivider.frame = NSRect(x: 140, y: responseRowY + 8, width: 1, height: 18)
+
+        let responseIcon: CGFloat = 28
+        var responseIconX = width - 16 - responseIcon
+        responseExpandButton.frame = NSRect(
+            x: responseIconX,
+            y: responseRowY + 3,
+            width: responseIcon,
+            height: responseIcon
+        )
+        responseIconX -= responseIcon + 4
+        responseDownloadButton.frame = NSRect(
+            x: responseIconX,
+            y: responseRowY + 3,
+            width: responseIcon,
+            height: responseIcon
+        )
+        responseIconX -= responseIcon + 4
+        responseCopyButton.frame = NSRect(
+            x: responseIconX,
+            y: responseRowY + 3,
+            width: responseIcon,
+            height: responseIcon
         )
 
-        // Response toggle and prompt-history dropdown share the row between
-        // the textbox and the response panel.
-        let responseToggleVisible = !isMinimized && !responseText.isEmpty
-        responseButton.frame = NSRect(x: 16, y: headerY, width: 140, height: 20)
-        let queryX: CGFloat = responseToggleVisible ? 16 + 148 : 16
-        queryPopup.frame = NSRect(
-            x: queryX,
-            y: headerY - 1,
-            width: max(CGFloat(120), width - 16 - queryX),
-            height: 24
-        )
+        let queryX: CGFloat = 152
+        let queryWidth = max(140, responseIconX - 12 - queryX)
+        queryPopup.frame = NSRect(x: queryX, y: responseRowY, width: queryWidth, height: 34)
         queryPopup.isHidden = isMinimized || sessionQueries.isEmpty
-
-        tabBar.frame = NSRect(
-            x: 4,
-            y: height - 30,
-            width: width - 8,
-            height: 28
-        )
-        tabBar.isHidden = mode != .selfHost
-        let profileWidth: CGFloat = 140
-        profilePopup.frame = NSRect(x: 4, y: 1, width: profileWidth, height: 24)
-        profilePopup.isHidden = mode != .selfHost
-        tabScrollView.frame = NSRect(
-            x: profileWidth + 8,
-            y: 0,
-            width: max(40, tabBar.frame.width - profileWidth - 8 - 140),
-            height: 26
-        )
-        newTabButton.frame = NSRect(
-            x: tabBar.frame.width - 132,
-            y: 1,
-            width: 26,
-            height: 24
-        )
-        // The window controls sit to the right of the tab strip in RPC mode;
-        // their frames are set above alongside the header row.
 
         if mode == .selfHost {
             responseWebView.isHidden = true
             for tab in rpcTabs {
                 tab.webView.frame = NSRect(
-                    x: 10,
+                    x: 16,
                     y: textY,
-                    width: width - 20,
+                    width: width - 32,
                     height: textHeight
                 )
                 tab.webView.isHidden = isMinimized || !(tab.id == activeRpcTabID && responseExpanded)
             }
         } else {
             responseWebView.frame = NSRect(
-                x: 10,
+                x: 16,
                 y: textY,
-                width: width - 20,
+                width: width - 32,
                 height: textHeight
             )
             responseWebView.isHidden = isMinimized || !responseExpanded
@@ -6249,6 +6914,93 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         window.invalidateCursorRects(for: container)
         updateResponseButton()
+    }
+
+    /// Dev-only: render the window to a PNG so the theme can be checked
+    /// without screen-recording permission. Triggered by PI_OVERLAY_PREVIEW.
+    func renderPreview(to path: String) {
+        let minimized = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_MIN"] == "1"
+        isMinimized = minimized
+        window.setFrame(
+            NSRect(
+                x: 0,
+                y: 0,
+                width: 900,
+                height: minimized ? Theme.tabStripHeight : 695
+            ),
+            display: true
+        )
+
+        rpcTabs = []
+        let tab = makeBlankTab()
+        tab.directory = URL(fileURLWithPath: NSHomeDirectory() + "/code/pi-overlay")
+        tab.currentModel = [
+            "provider": "ollama-cloud",
+            "id": "deepseek-v4.1-flash",
+            "name": "DeepSeek V4.1 Flash",
+        ]
+        tab.models = [tab.currentModel!]
+        tab.status = .done
+        tab.latestAnswerText = """
+        The power stage uses a two-phase buck with a 48 V input and a 0.9 V core rail.         Keep the inductor ripple below 30% and give the feedback divider a dedicated         kelvin return.
+        """
+        tab.responseText = tab.latestAnswerText
+        tab.queries = [SessionQuery(
+            id: "preview-1",
+            prompt: "Lets discuss power supply in this session for our board",
+            answer: tab.latestAnswerText
+        )]
+        tab.rawText = ""
+        rpcTabs = [tab]
+        activeRpcTabID = tab.id
+        activeDirectory = tab.directory!
+
+        keyTape.setText("")
+        keyTape.agentStatus = .done
+        keyTape.needsDisplay = true
+
+        statusLabel.stringValue = "READY"
+        statusLabel.textColor = .systemGreen
+
+        sessionInfos = [PiSessionInfo(
+            path: "/preview/session.jsonl",
+            name: "Lets discuss power supply in this session for our board",
+            preview: nil,
+            modified: Date()
+        )]
+        sessionQueries = tab.queries
+        selectedQueryID = nil
+
+        let profileMenu = NSMenu()
+        let profileHeader = NSMenuItem(title: "localllm", action: nil, keyEquivalent: "")
+        profileMenu.addItem(profileHeader)
+        profilePopup.menu = profileMenu
+        profilePopup.title = "localllm"
+        responseText = tab.responseText
+        responseExpanded = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_RESPONSE"] == "1"
+        responseUserCollapsed = !responseExpanded
+        directoryPopup.title = "📁 pi-overlay-extension"
+        directoryPopup.toolTip = tab.directory?.path
+        pidLabel.stringValue = "pi 6288"
+        rebuildDirectoryMenu()
+        rebuildModelMenu()
+        rebuildSessionMenu()
+        rebuildQueryMenu()
+        rebuildTabBar()
+        layoutViews()
+        updateResponseButton()
+        modelPopup.isEnabled = true
+        sessionPopup.isEnabled = true
+        newSessionButton.isEnabled = true
+
+        guard let content = window.contentView,
+              let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) else {
+            return
+        }
+        content.cacheDisplay(in: content.bounds, to: rep)
+        guard let data = rep.representation(using: .png, properties: [:]) else { return }
+        try? data.write(to: URL(fileURLWithPath: path))
+        debugLog("preview rendered to \(path) size=\(rep.pixelsWide)x\(rep.pixelsHigh)")
     }
 
     private static func appendText(_ base: String, _ addition: String) -> String {
@@ -6579,9 +7331,14 @@ if mode == .tty && (ttyPath == nil || ttyPath?.isEmpty == true) {
     ttyPath = controllingTTY()
 }
 debugLog("launch mode=\(mode) tty=\(ttyPath ?? "nil") dir=\(directory ?? "nil")")
-let controller = OverlayController(mode: mode, ttyPath: ttyPath, directory: directory)
-let appDelegate = AppDelegate(controller: controller)
 let app = NSApplication.shared
+let controller = OverlayController(mode: mode, ttyPath: ttyPath, directory: directory)
+if let preview = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW"], !preview.isEmpty {
+    app.setActivationPolicy(.accessory)
+    controller.renderPreview(to: preview)
+    exit(0)
+}
+let appDelegate = AppDelegate(controller: controller)
 app.delegate = appDelegate
 app.setActivationPolicy(.accessory)
 app.run()

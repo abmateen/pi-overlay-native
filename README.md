@@ -11,20 +11,25 @@ in a directory you pick (`self` mode, the default when launched on its own).
 
 ## What it looks like
 
-```text
-TTY /dev/ttys007                pi — my-session        ▾   👁   ×
-🎤  type a command, then press Enter…
-```
-
-In self mode the TTY label is replaced by a directory dropdown, a model
-dropdown, and the `pi` RPC child PID, with a row of saved sessions underneath:
+The window is a light rounded card with a dark input area and a purple accent.
+The top bar holds the profile pill, tabs, **＋**, and an icon cluster on the
+right (terminal diagnostics, Response panel, hide, collapse, close). Under it
+sit the status pill, folder/model dropdowns and the pi/ssh PID chip, then the
+Sessions row and the large prompt card.
 
 ```text
-👤 daily ▾  [ pi-overlay-extension  × ] [ ● /tmp  × ] [ ✓ api-server  × ]     ＋   ▾   👁   ×
-📁 pi-overlay-extension ▾   [DeepSeek V4.1 Flash ▾]   pi 42165
-Sessions  [fix markdown tables · Oct 24             ▾]  ＋
-🎤  type a command, then press Enter…
+[👤 daily ▾] [ ✓ pi-overlay-extension × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ⌄  ×
+READY  │  [📁 pi-overlay-extension ▾]  [DeepSeek V4.1 Flash ▾]  [pi 42165]
+💬 Sessions  [fix markdown tables · Oct 24                    ▾]  ＋
+┌────────────────────────────────────────────────────────────────────────┐
+│ type…                                                                  │
+│  🎤  🖼  📎                                              ⌘ ↵ Send   ✓ Done │
+└────────────────────────────────────────────────────────────────────────┘
+ ▸ Response  │  [Latest answer ▾]                              ⧉   ⤓   ⤢
 ```
+
+In tty mode the label row shows the target terminal and window title instead of
+the folder/model controls.
 
 - Typing is always enabled: the overlay only receives keys while its window is
   focused, so there is no separate capture/START toggle.
@@ -32,12 +37,12 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
   between launches; on a fresh launch it opens at 900 × 695 pt (clamped to the
   screen), anchored to the bottom of the visible area. Extra height goes to the
   Response panel while it is open; otherwise the textbox grows with the window.
-- **▾** collapses the overlay to just the tabs (32 pt tall) and **▴** restores
-  it; **👁** hides the window — it keeps its size, position, prompt and running
-  pi sessions, and comes back from **Show Overlay** in the menu-bar icon's
-  menu; **×** closes the overlay.
-  In self mode these live in the tab strip, so they stay reachable while
-  collapsed.
+- The top-right icon cluster is **>_ diagnostics**, **▤ Response**, **👁 hide**,
+  **⌄/⌃ collapse/restore** and **× close**. **⌄** shrinks the overlay to just the
+  top bar (56 pt tall); **👁** hides the window — it keeps its size, position,
+  prompt and running pi sessions, and comes back from **Show Overlay** in the
+  menu-bar icon's menu; **×** closes the overlay. In self mode these live in the
+  top bar, so they stay reachable while collapsed.
 - `TTY /dev/ttys007` is the target terminal.
 - In self mode, `📁 name ▾` is the working directory dropdown for the active
   tab (recent folders, **Choose Folder…**, Reveal in Finder, **Start/Restart pi**
@@ -98,8 +103,12 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 | **Speak button** 🎤 | Start/stop voice input (bottom-left inside the textbox; same as Option + V) |
 | **Arrows / click / drag** | Move the caret, place it with the mouse, or select text |
 | **Backspace** | Delete the character or selection before the caret |
-| **▾ / ▴** in the tab strip | Minimize the overlay to just the tabs / restore it |
+| **⌄ / ⌃** in the top bar | Minimize the overlay to just the top bar / restore it |
 | **👁 (hide)** | Hide the window only; reopen it with **Show Overlay** from the menu-bar icon |
+| **>_ (diagnostics)** | Show the debug log, open `profiles.conf`, or open pi's agent folder |
+| **Send** (⌘ ↵) | Send the pending prompt (same as Return) |
+| **🖼 (image)** and **📎 (attach)** | Attach images to the next prompt, or insert file paths into it |
+| **Response icons** | Copy the answer, save it as Markdown, or expand/collapse the panel |
 | **Notification click** | Brings the overlay back on the tab whose turn finished |
 | **Cmd + M** | Same as **▾ / ▴** |
 | **Drag edge or corner** | Resize the overlay; the size is remembered (the Response panel takes extra height while open) |
@@ -108,8 +117,8 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 The overlay receives keys only while it has focus; there is no separate capture
 toggle. It is not a global keylogger.
 
-While minimized, only the tab strip is clickable: text keys are ignored, but tab
-switching, **＋**, **▾/▴**, Ctrl+T/Ctrl+W, Ctrl+N and Cmd+M still work.
+While minimized, only the top bar is clickable: text keys are ignored, but tab
+switching, **＋**, **⌄/⌃**, Ctrl+T/Ctrl+W, Ctrl+N and Cmd+M still work.
 
 ## Notifications
 
