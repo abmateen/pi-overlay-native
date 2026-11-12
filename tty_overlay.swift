@@ -86,6 +86,40 @@ enum Theme {
         NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
     }
 
+    /// SF Symbol rotated in a square canvas. The result is a template image,
+    /// so `contentTintColor` on the button still controls its color.
+    static func rotatedSymbol(
+        _ name: String,
+        size: CGFloat,
+        weight: NSFont.Weight = .semibold,
+        degrees: CGFloat
+    ) -> NSImage? {
+        guard let base = NSImage(systemSymbolName: name, accessibilityDescription: nil) else {
+            return nil
+        }
+        let config = NSImage.SymbolConfiguration(pointSize: size, weight: weight)
+        guard let image = base.withSymbolConfiguration(config) else { return nil }
+
+        let width = image.size.width
+        let height = image.size.height
+        let side = max(width, height)
+        let canvas = NSImage(size: NSSize(width: side, height: side))
+        canvas.lockFocus()
+        let transform = NSAffineTransform()
+        transform.translateX(by: side / 2, yBy: side / 2)
+        transform.rotate(byDegrees: degrees)
+        transform.concat()
+        image.draw(in: NSRect(
+            x: -width / 2,
+            y: -height / 2,
+            width: width,
+            height: height
+        ))
+        canvas.unlockFocus()
+        canvas.isTemplate = true
+        return canvas
+    }
+
     /// SF Symbol tinted through a palette configuration (macOS 12+).
     static func symbol(
         _ name: String,
@@ -316,17 +350,20 @@ final class IconButton: NSButton {
     var symbolTint: NSColor = Theme.textSecondary
     var hoverFill: NSColor = Theme.fieldAlt
     var baseFill: NSColor = .clear
+    var symbolRotation: CGFloat = 0
 
     convenience init(
         symbol: String,
         size: CGFloat = 14,
         tint: NSColor = Theme.textSecondary,
-        tooltip: String? = nil
+        tooltip: String? = nil,
+        rotation: CGFloat = 0
     ) {
         self.init(frame: .zero)
         symbolName = symbol
         symbolSize = size
         symbolTint = tint
+        symbolRotation = rotation
         isBordered = false
         imagePosition = .imageOnly
         imageScaling = .scaleProportionallyDown
@@ -340,7 +377,16 @@ final class IconButton: NSButton {
         symbolName = name
         if let size { symbolSize = size }
         if let tint { symbolTint = tint }
-        image = Theme.symbol(name, size: symbolSize, weight: .medium, color: symbolTint)
+        if symbolRotation == 0 {
+            image = Theme.symbol(name, size: symbolSize, weight: .medium, color: symbolTint)
+        } else {
+            image = Theme.rotatedSymbol(
+                name,
+                size: symbolSize,
+                weight: .medium,
+                degrees: symbolRotation
+            )
+        }
         contentTintColor = symbolTint
     }
 
@@ -3395,10 +3441,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         )
         hideButton.setAccessibilityLabel("Hide overlay")
         compactButton = IconButton(
-            symbol: "arrow.down.right.and.arrow.up.left",
-            size: 13,
+            symbol: "sidebar.right",
+            size: 14,
             tint: Theme.textSecondary,
-            tooltip: "Compact textbox mode — hide everything but the prompt"
+            tooltip: "Compact textbox mode — hide everything but the prompt",
+            rotation: -90
         )
         compactButton.setAccessibilityLabel("Compact textbox mode")
         compactRestoreButton = IconButton(

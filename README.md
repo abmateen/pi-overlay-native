@@ -18,7 +18,7 @@ sit the status pill, folder/model dropdowns and the pi/ssh PID chip, then the
 Sessions row and the large prompt card.
 
 ```text
-[👤 daily ▾] [ ✓ pi-overlay-extension × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ⤡  ⌄  ×
+[👤 daily ▾] [ ✓ pi-overlay-extension × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ▯  ⌄  ×
 READY  │  [📁 pi-overlay-extension ▾]  [DeepSeek V4.1 Flash ▾]  [pi 42165]
 💬 Sessions  [fix markdown tables · Oct 24                    ▾]  ＋
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -33,7 +33,7 @@ the folder/model controls.
 
 ### Compact textbox mode
 
-The **⤡** button in the top-right cluster hides the whole interface except one
+The **▯** button in the top-right cluster hides the whole interface except one
 capsule-shaped prompt on a transparent window: mic, text, `pi`/`ssh` pid, and
 the Send/Cancel pill. Above the capsule's right end sit an **eye** button (hide
 the overlay; reopen it from the menu-bar icon) and a **⤢** button that brings the
@@ -53,7 +53,7 @@ move it.
   screen), anchored to the bottom of the visible area. Extra height goes to the
   Response panel while it is open; otherwise the textbox grows with the window.
 - The top-right icon cluster is **>_ diagnostics**, **▤ Response**, **👁 hide**,
-  **⤡ compact**, **⌄/⌃ collapse/restore** and **× close**. **⌄** shrinks the overlay to just the
+  **▯ compact**, **⌄/⌃ collapse/restore** and **× close**. **⌄** shrinks the overlay to just the
   top bar (56 pt tall); **👁** hides the window — it keeps its size, position,
   prompt and running pi sessions, and comes back from **Show Overlay** in the
   menu-bar icon's menu; **×** closes the overlay. In self mode these live in the
@@ -118,7 +118,7 @@ move it.
 | **Speak button** 🎤 | Start/stop voice input (bottom-left inside the textbox; same as Option + V) |
 | **Arrows / click / drag** | Move the caret, place it with the mouse, or select text |
 | **Backspace** | Delete the character or selection before the caret |
-| **⤡ (compact)** | Shrink the overlay to a single rounded textbox on a transparent window; the **⤢** button above it restores the full UI |
+| **▯ (compact)** | Shrink the overlay to a single rounded textbox on a transparent window; the **⤢** button above it restores the full UI |
 | **⌄ / ⌃** in the top bar | Minimize the overlay to just the top bar / restore it |
 | **👁 (hide)** | Hide the window only; reopen it with **Show Overlay** from the menu-bar icon |
 | **>_ (diagnostics)** | Show the debug log, open `profiles.conf`, or open pi's agent folder |
