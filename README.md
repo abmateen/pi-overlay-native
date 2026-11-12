@@ -18,18 +18,30 @@ sit the status pill, folder/model dropdowns and the pi/ssh PID chip, then the
 Sessions row and the large prompt card.
 
 ```text
-[👤 daily ▾] [ ✓ pi-overlay-extension × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ⌄  ×
+[👤 daily ▾] [ ✓ pi-overlay-extension × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ⤡  ⌄  ×
 READY  │  [📁 pi-overlay-extension ▾]  [DeepSeek V4.1 Flash ▾]  [pi 42165]
 💬 Sessions  [fix markdown tables · Oct 24                    ▾]  ＋
 ┌────────────────────────────────────────────────────────────────────────┐
 │ type…                                                                  │
 │  🎤  🖼  📎                                              ⌘ ↵ Send   ✓ Done │
 └────────────────────────────────────────────────────────────────────────┘
- ▸ Response  │  [Latest answer ▾]                              ⧉   ⤓   ⤢
+ ▸ Response  │  [Latest answer ▾]  💡                           ⧉   ⤓   ⤢
 ```
 
 In tty mode the label row shows the target terminal and window title instead of
 the folder/model controls.
+
+### Compact textbox mode
+
+The **⤡** button in the top-right cluster hides the whole interface except one
+capsule-shaped prompt on a transparent window: mic, text, `pi`/`ssh` pid, and
+the Send/Cancel pill. A small **⤢** button above the capsule's right end brings
+the full overlay back. The capsule opens bottom-centre on the current screen,
+with a 28 pt gap above the Dock/screen edge, and returns to the previous window
+frame when you restore. Enter sends, Shift+Enter inserts a newline, Esc cancels
+the running turn, and the pi sessions, tabs and prompt keep running normally.
+Drag the transparent strip above the capsule (or the capsule background) to
+move it.
 
 - Typing is always enabled: the overlay only receives keys while its window is
   focused, so there is no separate capture/START toggle.
@@ -38,7 +50,7 @@ the folder/model controls.
   screen), anchored to the bottom of the visible area. Extra height goes to the
   Response panel while it is open; otherwise the textbox grows with the window.
 - The top-right icon cluster is **>_ diagnostics**, **▤ Response**, **👁 hide**,
-  **⌄/⌃ collapse/restore** and **× close**. **⌄** shrinks the overlay to just the
+  **⤡ compact**, **⌄/⌃ collapse/restore** and **× close**. **⌄** shrinks the overlay to just the
   top bar (56 pt tall); **👁** hides the window — it keeps its size, position,
   prompt and running pi sessions, and comes back from **Show Overlay** in the
   menu-bar icon's menu; **×** closes the overlay. In self mode these live in the
@@ -74,7 +86,7 @@ the folder/model controls.
 - The terminal window title is shown next to the TTY.
 - The large text area is a real text box: the caret, arrow keys, selection, mouse placement, undo, cut/copy/paste and word wrap are the native macOS ones.
 - The bottom-right status shows **Processing** while the agent is running and **Done** in green when it settles.
-- A collapsible **Response** section under the textbox renders the final assistant text as GitHub-flavored Markdown, including headings, tables, lists, code blocks, and emphasis. Thinking/reasoning blocks are excluded.
+- A collapsible **Response** section under the textbox renders the final assistant text as GitHub-flavored Markdown, including headings, tables, lists, code blocks, and emphasis. Thinking/reasoning is hidden by default (use the 💡 toggle). Provider errors, request timeouts and failed prompt commands are shown here too (as a **Request failed** block with the provider message) and in the prompt history; automatic retries show a **Request failed — retrying n/m** notice instead of leaving the panel blank. The **💡 thinking** toggle next to the prompt-history dropdown shows the model's visible reasoning: while a turn is generating it streams live under **Thinking**, followed by the partial answer under **Response**, and the finished turn keeps both.
 - A **prompt history** dropdown beside the Response toggle lists the session's previous user prompts (newest first). Pick one to show the answer that followed it; **Latest answer** returns to the most recent turn. The list refreshes after each turn and when a session is loaded or switched. With no selection, the panel always shows the latest answer.
 
 ## Controls
@@ -103,12 +115,14 @@ the folder/model controls.
 | **Speak button** 🎤 | Start/stop voice input (bottom-left inside the textbox; same as Option + V) |
 | **Arrows / click / drag** | Move the caret, place it with the mouse, or select text |
 | **Backspace** | Delete the character or selection before the caret |
+| **⤡ (compact)** | Shrink the overlay to a single rounded textbox on a transparent window; the **⤢** button above it restores the full UI |
 | **⌄ / ⌃** in the top bar | Minimize the overlay to just the top bar / restore it |
 | **👁 (hide)** | Hide the window only; reopen it with **Show Overlay** from the menu-bar icon |
 | **>_ (diagnostics)** | Show the debug log, open `profiles.conf`, or open pi's agent folder |
-| **Send** (⌘ ↵) | Send the pending prompt (same as Return) |
+| **Send / Cancel** (⌘ ↵) | Send the pending prompt (same as Return). While a turn is running the same pill becomes **■ Cancel** and aborts it (same as Esc) |
 | **🖼 (image)** and **📎 (attach)** | Attach images to the next prompt, or insert file paths into it |
-| **Response icons** | Copy the answer, save it as Markdown, or expand/collapse the panel |
+| **💡 (thinking)** | Show/hide visible reasoning for the current answer; streams live while the turn is generating |
+| **Response icons** | Copy the answer (with thinking when enabled), save it as Markdown, or expand/collapse the panel |
 | **Notification click** | Brings the overlay back on the tab whose turn finished |
 | **Cmd + M** | Same as **▾ / ▴** |
 | **Drag edge or corner** | Resize the overlay; the size is remembered (the Response panel takes extra height while open) |

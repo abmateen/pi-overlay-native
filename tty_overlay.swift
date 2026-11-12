@@ -264,6 +264,7 @@ final class IconButton: NSButton {
     var symbolSize: CGFloat = 14
     var symbolTint: NSColor = Theme.textSecondary
     var hoverFill: NSColor = Theme.fieldAlt
+    var baseFill: NSColor = .clear
 
     convenience init(
         symbol: String,
@@ -296,7 +297,7 @@ final class IconButton: NSButton {
         super.updateLayer()
         layer?.backgroundColor = isHighlighted
             ? hoverFill.cgColor
-            : NSColor.clear.cgColor
+            : baseFill.cgColor
     }
 }
 
@@ -708,14 +709,34 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
     /// and the status pill, so wrapped text never runs underneath them.
     static let bottomBand: CGFloat = 58
     private static let textInset = NSSize(width: 10, height: 8)
+    private var bottomBand: CGFloat { isCompact ? 0 : Self.bottomBand }
 
     weak var controller: OverlayController? {
         didSet { textView.controller = controller }
     }
 
-    var agentStatus: AgentStatus = .idle
+    var agentStatus: AgentStatus = .idle {
+        didSet {
+            guard agentStatus != oldValue else { return }
+            needsDisplay = true
+            onStatusChange?(agentStatus)
+        }
+    }
+    /// Called when the Processing/Done state changes (drives the Send button).
+    var onStatusChange: ((AgentStatus) -> Void)?
     /// Space reserved on the right of the bottom band for the Send button.
     var statusRightInset: CGFloat = 18
+    /// Compact single-capsule mode: no status band, the text area sits between
+    /// the microphone and the pid/Send controls.
+    var isCompact = false {
+        didSet {
+            guard isCompact != oldValue else { return }
+            needsDisplay = true
+            needsLayout = true
+        }
+    }
+    /// Right-hand space (pid + Send) reserved in compact mode.
+    var compactRightInset: CGFloat = 200
 
     let scrollView: NSScrollView
     let textView: OverlayTextView
@@ -796,12 +817,22 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
 
     /// Area inside the border that holds the text, above the bottom band.
     var textArea: NSRect {
+        if isCompact {
+            let left: CGFloat = 64
+            let top = max(8, (bounds.height - 26) / 2)
+            return NSRect(
+                x: left,
+                y: top,
+                width: max(10, bounds.width - left - compactRightInset),
+                height: 26
+            )
+        }
         let inset = Self.textInset
         return NSRect(
             x: inset.width,
             y: inset.height,
             width: max(10, bounds.width - inset.width * 2),
-            height: max(10, bounds.height - inset.height - Self.bottomBand)
+            height: max(10, bounds.height - inset.height - bottomBand)
         )
     }
 
@@ -865,6 +896,10 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
 
     override func mouseDown(with event: NSEvent) {
         focusTextView()
+        if isCompact, let window {
+            window.performDrag(with: event)
+            return
+        }
         super.mouseDown(with: event)
     }
 
@@ -879,16 +914,25 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
 
     override func draw(_ dirtyRect: NSRect) {
         // Dark input card: large radius, near-black fill, hairline border.
+        let radius = isCompact ? bounds.height / 2 : Theme.inputRadius
+        // In compact mode the capsule is translucent: the desktop shows
+        // through, while the text keeps enough contrast to stay readable.
+        let fill = isCompact
+            ? NSColor(calibratedWhite: 0.03, alpha: 0.30)
+            : Self.background
         NSGraphicsContext.saveGraphicsState()
-        Theme.rounded(bounds, Theme.inputRadius).addClip()
-        Self.background.setFill()
+        Theme.rounded(bounds, radius).addClip()
+        fill.setFill()
         dirtyRect.fill()
         NSGraphicsContext.restoreGraphicsState()
 
-        Self.borderColor.setStroke()
+        let stroke = isCompact
+            ? NSColor.white.withAlphaComponent(0.14)
+            : Self.borderColor
+        stroke.setStroke()
         let border = Theme.rounded(
             bounds.insetBy(dx: 0.5, dy: 0.5),
-            Theme.inputRadius
+            radius
         )
         border.lineWidth = 1
         border.stroke()
@@ -898,7 +942,9 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
             let area = textArea
             let attrs: [NSAttributedString.Key: Any] = [
                 .font: Self.font,
-                .foregroundColor: Self.placeholderColor,
+                .foregroundColor: isCompact
+                    ? NSColor.white.withAlphaComponent(0.55)
+                    : Self.placeholderColor,
                 .paragraphStyle: Self.paragraphStyle,
             ]
             NSGraphicsContext.saveGraphicsState()
@@ -935,7 +981,7 @@ final class KeyTapeView: NSView, NSTextViewDelegate {
     }
 
     private func drawAgentStatus() {
-        guard agentStatus != .idle else { return }
+        guard agentStatus != .idle, !isCompact else { return }
 
         let label = agentStatus == .processing ? "●  Processing" : "✓  Done"
         let font = Theme.font(11, .semibold)
@@ -2761,6 +2807,17 @@ final class RpcSession {
             return block["text"] as? String
         }.joined()
     }
+
+    /// Visible thinking/reasoning blocks in an assistant message.
+    static func messageThinking(from message: [String: Any]) -> String {
+        guard let blocks = message["content"] as? [[String: Any]] else { return "" }
+        return blocks.compactMap { block -> String? in
+            guard block["type"] as? String == "thinking" else { return nil }
+            return block["thinking"] as? String
+        }
+        .joined(separator: "\n\n")
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2772,6 +2829,8 @@ struct SessionQuery {
     let id: String
     let prompt: String
     var answer: String
+    /// Visible thinking/reasoning that produced this answer.
+    var thinking: String = ""
 }
 
 final class ModelRef: NSObject {
@@ -2812,7 +2871,15 @@ final class RpcTab {
     var sessionName: String?
     var assistantText = ""
     var streamingText = ""
+    /// Thinking/reasoning for the current turn and the live stream.
+    var thinkingText = ""
+    var streamingThinking = ""
+    /// Show the thinking section in the response panel for this tab.
+    var showThinking = false
     var latestAnswerText = ""
+    /// Last provider/command error, so a settled run with no text can still
+    /// leave a visible message in the response panel.
+    var lastError: String?
     var responseText = ""
     var responseExpanded = false
     var responseUserCollapsed = false
@@ -2869,6 +2936,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let closeButton: IconButton
     let minimizeButton: IconButton
     let hideButton: IconButton
+    let compactButton: IconButton
+    let compactRestoreButton: IconButton
+    let compactPidLabel: NSTextField
+    let compactBackdrop: NSVisualEffectView
     let panelButton: IconButton
     let terminalButton: IconButton
     let topDivider: NSView
@@ -2885,6 +2956,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let responseExpandButton: IconButton
     let responseWebView: WKWebView
     let queryPopup: NSPopUpButton
+    let thinkingButton: IconButton
 
     private var responseExpanded = false
     private var responseUserCollapsed = false
@@ -2963,6 +3035,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     var terminalInjector: AppleScriptInjector?
 
     private var isMinimized = false
+    /// Compact capsule mode: only the textbox (and a small restore button) is
+    /// visible; the window background is transparent.
+    private var isCompact = false
+    private var compactRestoreFrame: NSRect?
     private var expandedHeight: CGFloat = 0
     private var sessionInfos: [PiSessionInfo] = []
     private var sessionLoadToken = 0
@@ -3084,6 +3160,18 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         container.layer?.borderWidth = 1
         window.contentView = container
 
+        // Translucent material behind the compact capsule. With a transparent
+        // window this samples the desktop, so the textbox reads as glass
+        // instead of a solid black bar.
+        compactBackdrop = NSVisualEffectView(frame: .zero)
+        compactBackdrop.material = .hudWindow
+        compactBackdrop.blendingMode = .behindWindow
+        compactBackdrop.state = .active
+        compactBackdrop.wantsLayer = true
+        compactBackdrop.layer?.masksToBounds = true
+        compactBackdrop.isHidden = true
+        container.addSubview(compactBackdrop, positioned: .below, relativeTo: nil)
+
         // status label
         statusLabel = StatusPillLabel(labelWithString: "READY")
         statusLabel.font = Theme.font(12, .semibold)
@@ -3179,7 +3267,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         newSessionButton.layer?.cornerRadius = Theme.fieldRadius
         newSessionButton.layer?.borderWidth = 1
         newSessionButton.layer?.borderColor = Theme.border.cgColor
-        newSessionButton.layer?.backgroundColor = Theme.field.cgColor
+        newSessionButton.baseFill = Theme.field
         newSessionButton.isHidden = mode != .selfHost
         newSessionButton.isEnabled = false
         container.addSubview(newSessionButton)
@@ -3253,6 +3341,30 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tooltip: "Hide the overlay — reopen it from the menu-bar icon"
         )
         hideButton.setAccessibilityLabel("Hide overlay")
+        compactButton = IconButton(
+            symbol: "arrow.down.right.and.arrow.up.left",
+            size: 13,
+            tint: Theme.textSecondary,
+            tooltip: "Compact textbox mode — hide everything but the prompt"
+        )
+        compactButton.setAccessibilityLabel("Compact textbox mode")
+        compactRestoreButton = IconButton(
+            symbol: "arrow.up.left.and.arrow.down.right",
+            size: 12,
+            tint: NSColor.white,
+            tooltip: "Restore the full overlay"
+        )
+        compactRestoreButton.hoverFill = NSColor.black.withAlphaComponent(0.85)
+        compactRestoreButton.baseFill = NSColor.black.withAlphaComponent(0.55)
+        compactRestoreButton.layer?.cornerRadius = 13
+        compactRestoreButton.isHidden = true
+        container.addSubview(compactRestoreButton)
+        compactPidLabel = NSTextField(labelWithString: "")
+        compactPidLabel.font = Theme.mono(11, .medium)
+        compactPidLabel.textColor = NSColor(calibratedWhite: 0.62, alpha: 1)
+        compactPidLabel.alignment = .right
+        compactPidLabel.lineBreakMode = .byTruncatingHead
+        compactPidLabel.isHidden = true
         minimizeButton = IconButton(
             symbol: "chevron.down",
             size: 14,
@@ -3265,7 +3377,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tint: Theme.textSecondary,
             tooltip: "Close overlay"
         )
-        for button in [terminalButton, panelButton, hideButton, minimizeButton, closeButton] {
+        for button in [terminalButton, panelButton, hideButton, compactButton, minimizeButton, closeButton] {
             container.addSubview(button)
         }
 
@@ -3320,6 +3432,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         keyTape.addSubview(attachButton)
         keyTape.addSubview(sendButton)
         keyTape.addSubview(attachmentChip)
+        keyTape.addSubview(compactPidLabel)
         container.addSubview(keyTape)
 
         // Collapsible final-response panel under the key tape.
@@ -3348,6 +3461,15 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         queryPopup.isEnabled = false
         queryPopup.toolTip = "Show the answer for a previous prompt in this session"
         container.addSubview(queryPopup)
+
+        thinkingButton = IconButton(
+            symbol: "lightbulb",
+            size: 14,
+            tint: Theme.textTertiary,
+            tooltip: "Show thinking (reasoning)"
+        )
+        thinkingButton.isHidden = mode != .selfHost
+        container.addSubview(thinkingButton)
 
         responseCopyButton = IconButton(
             symbol: "doc.on.doc",
@@ -3402,6 +3524,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         window.delegate = self
         keyTape.controller = self
+        keyTape.onStatusChange = { [weak self] _ in self?.updateSendButton() }
         // native caret; no manual blink timer needed.
         voiceButton.target = self
         voiceButton.action = #selector(toggleVoice)
@@ -3417,6 +3540,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         attachmentChip.action = #selector(clearAttachments)
         terminalButton.target = self
         terminalButton.action = #selector(showDiagnosticsMenu(_:))
+        compactButton.target = self
+        compactButton.action = #selector(toggleCompact)
+        compactRestoreButton.target = self
+        compactRestoreButton.action = #selector(toggleCompact)
         panelButton.target = self
         panelButton.action = #selector(toggleResponse)
         responseCopyButton.target = self
@@ -3440,6 +3567,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         responseButton.sendAction(on: [.leftMouseDown])
         queryPopup.target = self
         queryPopup.action = #selector(querySelected(_:))
+        thinkingButton.target = self
+        thinkingButton.action = #selector(toggleThinking)
         newTabButton.target = self
         newTabButton.action = #selector(openNewTab)
         newSessionButton.target = self
@@ -3531,11 +3660,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     private func updateVoiceButton(listening: Bool) {
-        voiceButton.image = NSImage(
-            systemSymbolName: listening ? "waveform" : "mic.fill",
-            accessibilityDescription: "Speak"
+        voiceButton.image = Theme.symbol(
+            listening ? "waveform" : "mic.fill",
+            size: 15,
+            color: listening ? .systemRed : Theme.inputText
         )
-        voiceButton.contentTintColor = listening ? .systemRed : NSColor(white: 0.88, alpha: 1)
+        voiceButton.contentTintColor = listening ? .systemRed : Theme.inputText
         voiceButton.toolTip = listening
             ? "Stop listening (Option+V)"
             : "Speak (Option+V)"
@@ -4917,8 +5047,14 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     prompt: text.isEmpty ? "(image prompt)" : text,
                     answer: ""
                 )
-            } else if var open = current, !text.isEmpty {
-                open.answer = text
+            } else if var open = current {
+                let thinking = RpcSession.messageThinking(from: message)
+                if !thinking.isEmpty {
+                    open.thinking = open.thinking.isEmpty
+                        ? thinking
+                        : open.thinking + "\n\n" + thinking
+                }
+                if !text.isEmpty { open.answer = text }
                 current = open
             }
         }
@@ -4960,7 +5096,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         queryPopup.isEnabled = !sessionQueries.isEmpty
-        queryPopup.isHidden = isMinimized || sessionQueries.isEmpty
+        queryPopup.isHidden = isMinimized || isCompact || sessionQueries.isEmpty
         updateResponseButton()
     }
 
@@ -5014,7 +5150,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tab.responseText = text
             tab.responseExpanded = responseExpanded
             tab.responseUserCollapsed = responseUserCollapsed
-            renderMarkdown(in: tab.webView, text: text)
+            renderTabResponse(tab)
         }
         updateResponseButton()
         renderMarkdown()
@@ -5062,6 +5198,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 : "pi RPC child process ID \(session.processIdentifier)"
         } else if tab.exitStatus != nil {
             pidLabel.stringValue = tab.isRemote ? "ssh —" : "pi —"
+            compactPidLabel.stringValue = pidLabel.stringValue
             pidLabel.toolTip = nil
         } else {
             pidLabel.stringValue = ""
@@ -5416,6 +5553,67 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         debugLog("terminal session active dir=\(session.directory.path) tty=\(session.ttyPath ?? "nil")")
     }
 
+    /// Markdown block used when a turn fails. The raw provider text is kept in
+    /// a blockquote so it renders predictably even with punctuation/code.
+    private static func errorBlock(title: String, message: String) -> String {
+        let body = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = body.isEmpty ? "Pi ended the request with an error." : body
+        let quoted = text
+            .components(separatedBy: .newlines)
+            .map { $0.isEmpty ? ">" : "> \($0)" }
+            .joined(separator: "\n")
+        return "**\(title)**\n\n\(quoted)"
+    }
+
+    /// Puts an error (or a retry notice) in the response panel. Errors are
+    /// forced open even if the user collapsed the panel, and the last prompt
+    /// in the history gets the same text as its answer.
+    private func showAssistantFailure(
+        _ message: String,
+        title: String,
+        tab: RpcTab,
+        isActive: Bool,
+        existingText: String = "",
+        statusText: String = "PI ERROR",
+        isFinal: Bool = true
+    ) {
+        let block = Self.errorBlock(title: title, message: message)
+        let trimmed = existingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let display = trimmed.isEmpty ? block : trimmed + "\n\n---\n\n" + block
+
+        tab.lastError = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        tab.assistantText = display
+        tab.latestAnswerText = display
+        if !tab.queries.isEmpty {
+            tab.queries[tab.queries.count - 1].answer = display
+        }
+
+        let latestID = tab.queries.last?.id
+        if tab.selectedQueryID == nil || tab.selectedQueryID == latestID {
+            tab.responseText = display
+            tab.responseExpanded = true
+            tab.responseUserCollapsed = false
+            renderMarkdown(in: tab.webView, text: display)
+        }
+
+        if isActive {
+            responseText = tab.responseText
+            responseExpanded = tab.responseExpanded
+            responseUserCollapsed = tab.responseUserCollapsed
+            updateResponseButton()
+            renderMarkdown()
+            layoutViews()
+            statusLabel.stringValue = statusText
+            statusLabel.textColor = isFinal ? .systemRed : .systemOrange
+        }
+
+        debugLog(
+            "rpc failure tab=\(tabTitle(tab)) status=\(statusText) final=\(isFinal) "
+                + "error=\(tab.lastError?.prefix(200) ?? "")"
+        )
+        debugLog("rpc failure display=\(display.prefix(400))")
+    }
+
     private func handleRpcEvent(_ record: [String: Any], tabID: UUID, session: RpcSession) {
         guard let tab = rpcTab(withID: tabID),
               tab.session === session,
@@ -5433,9 +5631,24 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tab.status = .processing
             tab.assistantText = ""
             tab.streamingText = ""
+            tab.thinkingText = ""
+            tab.streamingThinking = ""
+            tab.lastError = nil
+            if isActive && tab.showThinking {
+                ensureThinkingPanelOpen(tab)
+                scheduleLiveResponseRender()
+            }
 
         case "agent_settled":
             tab.status = .done
+            if tab.assistantText.isEmpty,
+               let lastError = tab.lastError,
+               !lastError.isEmpty {
+                // Some failures only arrive as a retry/command error; make
+                // sure the panel is not left blank.
+                tab.assistantText = Self.errorBlock(title: "Request failed", message: lastError)
+                tab.latestAnswerText = tab.assistantText
+            }
             let finalText = tab.assistantText.isEmpty ? tab.streamingText : tab.assistantText
             if !finalText.isEmpty {
                 tab.assistantText = finalText
@@ -5449,16 +5662,56 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 if !finalText.isEmpty && !tab.responseExpanded && !tab.responseUserCollapsed {
                     tab.responseExpanded = true
                 }
-                renderMarkdown(in: tab.webView, text: tab.responseText)
+                renderTabResponse(tab)
             }
             notifyTurnFinished(profile: profileName(for: tab), tab: tab)
-            debugLog("rpc final tab=\(tabTitle(tab)) chars=\(finalText.count)")
+            debugLog(
+                "rpc final tab=\(tabTitle(tab)) chars=\(finalText.count) "
+                    + "thinking=\(tab.thinkingText.count) show=\(tab.showThinking)"
+            )
 
         case "message_update":
-            if let update = record["assistantMessageEvent"] as? [String: Any],
-               update["type"] as? String == "text_delta",
-               let delta = update["delta"] as? String {
-                tab.streamingText += delta
+            if let update = record["assistantMessageEvent"] as? [String: Any] {
+                let updateType = update["type"] as? String
+                if updateType == "error",
+                   (update["reason"] as? String) != "aborted" {
+                    let message = (update["error"] as? String)
+                        ?? (update["reason"] as? String)
+                        ?? "The provider stream ended with an error."
+                    showAssistantFailure(
+                        message,
+                        title: "Request failed",
+                        tab: tab,
+                        isActive: isActive,
+                        statusText: "PI ERROR"
+                    )
+                } else if updateType == "thinking_delta",
+                          let delta = update["delta"] as? String {
+                    tab.streamingThinking += delta
+                    if isActive && tab.showThinking {
+                        ensureThinkingPanelOpen(tab)
+                        scheduleLiveResponseRender()
+                    }
+                } else if updateType == "thinking_end",
+                          let content = update["content"] as? String {
+                    tab.streamingThinking = content
+                    if isActive && tab.showThinking {
+                        ensureThinkingPanelOpen(tab)
+                        scheduleLiveResponseRender()
+                    }
+                } else if updateType == "text_delta",
+                          let delta = update["delta"] as? String {
+                    tab.streamingText += delta
+                    if isActive && tab.showThinking {
+                        scheduleLiveResponseRender()
+                    }
+                } else if updateType == "text_end",
+                          let content = update["content"] as? String {
+                    tab.streamingText = content
+                    if isActive && tab.showThinking {
+                        scheduleLiveResponseRender()
+                    }
+                }
             }
 
         case "message_end":
@@ -5483,21 +5736,126 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                             layoutViews()
                         }
                     }
-                } else if role == "assistant", !text.isEmpty {
-                    tab.assistantText = text
-                    tab.latestAnswerText = text
-                    if !tab.queries.isEmpty {
-                        tab.queries[tab.queries.count - 1].answer = text
+                } else if role == "assistant" {
+                    let thinking = RpcSession.messageThinking(from: message)
+                    if !thinking.isEmpty {
+                        tab.thinkingText = thinking
+                    } else if !tab.streamingThinking.isEmpty {
+                        tab.thinkingText = tab.streamingThinking
                     }
-                    let latestID = tab.queries.last?.id
-                    if tab.selectedQueryID == nil || tab.selectedQueryID == latestID {
-                        tab.responseText = text
-                        if !tab.responseExpanded && !tab.responseUserCollapsed {
-                            tab.responseExpanded = true
+                    tab.streamingThinking = tab.thinkingText
+                    if !tab.thinkingText.isEmpty {
+                        debugLog(
+                            "rpc thinking tab=\(tabTitle(tab)) chars=\(tab.thinkingText.count)"
+                        )
+                    }
+
+                    let stopReason = message["stopReason"] as? String ?? ""
+                    let isAborted = stopReason == "aborted"
+                    let errorMessage = (message["errorMessage"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+
+                    if !isAborted, let errorMessage, !errorMessage.isEmpty {
+                        showAssistantFailure(
+                            errorMessage,
+                            title: "Request failed",
+                            tab: tab,
+                            isActive: isActive,
+                            existingText: text
+                        )
+                    } else if stopReason == "error", text.isEmpty {
+                        showAssistantFailure(
+                            "Pi ended the request with an error and no details.",
+                            title: "Request failed",
+                            tab: tab,
+                            isActive: isActive
+                        )
+                    } else if !text.isEmpty {
+                        tab.assistantText = text
+                        tab.latestAnswerText = text
+                        if !tab.queries.isEmpty {
+                            tab.queries[tab.queries.count - 1].answer = text
+                            if !tab.thinkingText.isEmpty {
+                                tab.queries[tab.queries.count - 1].thinking = tab.thinkingText
+                            }
                         }
-                        renderMarkdown(in: tab.webView, text: text)
+                        let latestID = tab.queries.last?.id
+                        if tab.selectedQueryID == nil || tab.selectedQueryID == latestID {
+                            tab.responseText = text
+                            if !tab.responseExpanded && !tab.responseUserCollapsed {
+                                tab.responseExpanded = true
+                            }
+                            renderTabResponse(tab)
+                        }
                     }
                 }
+            }
+
+        case "agent_end":
+            // Safety net: if the stream skipped message_end but the final run
+            // carries an error message, surface it instead of leaving a blank
+            // response panel. Retrying runs are handled by auto_retry_*.
+            if record["willRetry"] as? Bool != true,
+               tab.assistantText.isEmpty,
+               let messages = record["messages"] as? [[String: Any]] {
+                for message in messages.reversed() where message["role"] as? String == "assistant" {
+                    if let errorMessage = (message["errorMessage"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines),
+                       !errorMessage.isEmpty {
+                        showAssistantFailure(
+                            errorMessage,
+                            title: "Request failed",
+                            tab: tab,
+                            isActive: isActive
+                        )
+                        break
+                    }
+                    if message["stopReason"] as? String == "error" {
+                        showAssistantFailure(
+                            "Pi ended the request with an error and no details.",
+                            title: "Request failed",
+                            tab: tab,
+                            isActive: isActive
+                        )
+                        break
+                    }
+                }
+            }
+
+        case "auto_retry_start":
+            let attempt = record["attempt"] as? Int ?? 1
+            let maxAttempts = record["maxAttempts"] as? Int ?? attempt
+            let message = record["errorMessage"] as? String ?? "Request failed"
+            tab.lastError = message
+            let title = "Request failed — retrying \(attempt)/\(maxAttempts)"
+            if tab.assistantText.isEmpty && tab.streamingText.isEmpty {
+                showAssistantFailure(
+                    message,
+                    title: title,
+                    tab: tab,
+                    isActive: isActive,
+                    statusText: "RETRYING \(attempt)/\(maxAttempts)",
+                    isFinal: false
+                )
+            } else if isActive {
+                statusLabel.stringValue = "RETRYING \(attempt)/\(maxAttempts)"
+                statusLabel.textColor = .systemOrange
+            }
+
+        case "auto_retry_end":
+            if record["success"] as? Bool == false {
+                let finalError = (record["finalError"] as? String)
+                    ?? tab.lastError
+                    ?? "Request failed after retries"
+                showAssistantFailure(
+                    finalError,
+                    title: "Request failed",
+                    tab: tab,
+                    isActive: isActive,
+                    statusText: "PI ERROR"
+                )
+            } else {
+                tab.lastError = nil
             }
 
         case "response":
@@ -5511,10 +5869,13 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
                 if command == "prompt" {
                     tab.status = .idle
-                    if isActive {
-                        statusLabel.stringValue = "RPC ERROR"
-                        statusLabel.textColor = .systemRed
-                    }
+                    showAssistantFailure(
+                        error,
+                        title: "Prompt failed",
+                        tab: tab,
+                        isActive: isActive,
+                        statusText: "PROMPT ERROR"
+                    )
                 } else if command == "set_model", isActive {
                     statusLabel.stringValue = "MODEL ERROR"
                     statusLabel.textColor = .systemRed
@@ -5561,6 +5922,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         tab.assistantText = ""
                         tab.streamingText = ""
                         tab.latestAnswerText = ""
+                        tab.thinkingText = ""
+                        tab.streamingThinking = ""
+                        tab.lastError = nil
                         tab.responseText = ""
                         tab.responseExpanded = false
                         tab.responseUserCollapsed = false
@@ -5600,6 +5964,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         tab.assistantText = ""
                         tab.streamingText = ""
                         tab.latestAnswerText = ""
+                        tab.thinkingText = ""
+                        tab.streamingThinking = ""
+                        tab.lastError = nil
                         tab.responseText = ""
                         tab.responseExpanded = false
                         tab.responseUserCollapsed = false
@@ -5639,7 +6006,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                             if !tab.responseExpanded && !tab.responseUserCollapsed {
                                 tab.responseExpanded = true
                             }
-                            renderMarkdown(in: tab.webView, text: text)
+                            renderTabResponse(tab)
                         }
                         if isActive {
                             responseText = tab.responseText
@@ -5673,7 +6040,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                                 tab.responseExpanded = true
                             }
                         }
-                        renderMarkdown(in: tab.webView, text: tab.responseText)
+                        renderTabResponse(tab)
                         if isActive {
                             sessionQueries = tab.queries
                             selectedQueryID = tab.selectedQueryID
@@ -5738,6 +6105,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             }
             if type == "agent_settled" {
                 refreshSessionRow()
+                showIdleStatus()
             }
             if tab.status != previousStatus {
                 rebuildTabBar()
@@ -5766,6 +6134,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             }
             statusLabel.textColor = .systemRed
             pidLabel.stringValue = tab.isRemote ? "ssh —" : "pi —"
+            compactPidLabel.stringValue = pidLabel.stringValue
             pidLabel.toolTip = nil
             modelPopup.isEnabled = false
             modelPopup.toolTip = "pi exited"
@@ -6047,6 +6416,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     func shutdown() {
+        // Do not autosave the 96 pt compact frame for the next launch.
+        if isCompact, let frame = compactRestoreFrame {
+            isCompact = false
+            window.setFrame(frame, display: false)
+        }
         injector?.closeAll()
         for tab in rpcTabs {
             tab.session?.stop()
@@ -6142,7 +6516,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private func renderMarkdown() {
         if mode == .selfHost {
             guard let tab = activeRpcTab else { return }
-            renderMarkdown(in: tab.webView, text: tab.responseText)
+            renderTabResponse(tab)
         } else {
             renderMarkdown(in: responseWebView, text: responseText)
         }
@@ -6150,7 +6524,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if let tab = rpcTabs.first(where: { $0.webView === webView }) {
-            renderMarkdown(in: webView, text: tab.responseText)
+            renderTabResponse(tab)
         } else {
             renderMarkdown(in: webView, text: responseText)
         }
@@ -6264,16 +6638,127 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     private func updateResponseButton() {
-        let visible = !isMinimized && !responseText.isEmpty
+        // In self mode keep the Response row available even before the first
+        // answer so the thinking toggle can be armed ahead of a turn.
+        let visible = !isMinimized && !isCompact && (isSelfMode || !responseText.isEmpty)
         responseButton.isHidden = !visible
         responseButton.title = responseExpanded ? "▾  Response" : "▸  Response"
         responseDivider.isHidden = !visible
         responseCopyButton.isHidden = !visible
         responseDownloadButton.isHidden = !visible
         responseExpandButton.isHidden = !visible
+        thinkingButton.isHidden = !visible || mode != .selfHost
         responseCopyButton.isEnabled = visible && !responseText.isEmpty
         responseDownloadButton.isEnabled = visible && !responseText.isEmpty
         responseExpandButton.isEnabled = visible
+        applyThinkingButtonState()
+    }
+
+    private func applyThinkingButtonState() {
+        let on = mode == .selfHost && activeRpcTab?.showThinking == true
+        thinkingButton.setSymbol(
+            on ? "lightbulb.fill" : "lightbulb",
+            size: 14,
+            tint: on ? Theme.accent : Theme.textTertiary
+        )
+        thinkingButton.baseFill = on ? Theme.accentSoft : .clear
+        thinkingButton.toolTip = on
+            ? "Hide thinking (reasoning)"
+            : "Show thinking (reasoning)"
+        thinkingButton.setAccessibilityLabel(on ? "Hide thinking" : "Show thinking")
+        thinkingButton.needsDisplay = true
+    }
+
+    @objc private func toggleThinking() {
+        guard mode == .selfHost, let tab = activeRpcTab else { return }
+        tab.showThinking.toggle()
+        if tab.showThinking {
+            // A deliberate toggle should reveal the panel even if the user
+            // collapsed it earlier.
+            responseUserCollapsed = false
+            tab.responseUserCollapsed = false
+            ensureThinkingPanelOpen(tab)
+        }
+        applyThinkingButtonState()
+        updateResponseButton()
+        renderMarkdown()
+        layoutViews()
+        focusOverlay()
+    }
+
+    /// Opens the response panel when thinking starts streaming, unless the
+    /// user explicitly collapsed it.
+    private func ensureThinkingPanelOpen(_ tab: RpcTab) {
+        guard !responseExpanded, !responseUserCollapsed else { return }
+        responseExpanded = true
+        responseUserCollapsed = false
+        tab.responseExpanded = true
+        tab.responseUserCollapsed = false
+        updateResponseButton()
+        layoutViews()
+    }
+
+    private var liveRenderScheduled = false
+
+    /// Coalesces the high-frequency thinking/text deltas into ~12 fps renders.
+    private func scheduleLiveResponseRender() {
+        guard !liveRenderScheduled else { return }
+        liveRenderScheduled = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08) { [weak self] in
+            guard let self else { return }
+            self.liveRenderScheduled = false
+            self.renderMarkdown()
+        }
+    }
+
+    /// Composes thinking + answer. While a turn is running it uses the live
+    /// streaming fields, so the panel updates as reasoning arrives.
+    private func displayText(for tab: RpcTab) -> String {
+        let processing = tab.status == .processing
+        let thinking: String
+        if processing {
+            thinking = tab.streamingThinking.isEmpty
+                ? tab.thinkingText
+                : tab.streamingThinking
+        } else {
+            thinking = thinkingText(for: tab)
+        }
+        let answer = processing
+            ? (tab.streamingText.isEmpty ? tab.responseText : tab.streamingText)
+            : tab.responseText
+
+        guard tab.showThinking else {
+            return tab.responseText
+        }
+        if thinking.isEmpty && !processing {
+            return tab.responseText
+        }
+
+        var output = "### Thinking\n\n"
+            + (thinking.isEmpty ? "_Waiting for reasoning…_" : thinking)
+        if !answer.isEmpty {
+            output += "\n\n---\n\n### Response\n\n" + answer
+        } else if processing {
+            output += "\n\n---\n\n### Response\n\n_Generating…_"
+        }
+        return output
+    }
+
+    /// Thinking for the current/latest turn, or the selected historical one.
+    private func thinkingText(for tab: RpcTab) -> String {
+        if let id = tab.selectedQueryID,
+           let query = tab.queries.first(where: { $0.id == id }) {
+            if id == tab.queries.last?.id, !tab.thinkingText.isEmpty {
+                return tab.thinkingText
+            }
+            return query.thinking
+        }
+        if !tab.thinkingText.isEmpty { return tab.thinkingText }
+        return tab.queries.last?.thinking ?? ""
+    }
+
+    private func renderTabResponse(_ tab: RpcTab) {
+        renderMarkdown(in: tab.webView, text: displayText(for: tab))
     }
 
     private func updateMinimizeButton() {
@@ -6293,8 +6778,65 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     // MARK: - Attachments and response actions
 
+    /// The pill is Send while idle and Cancel while a turn is running. Cancel
+    /// sends `abort` to the RPC session (or Escape to a TTY backend).
     @objc private func sendFromButton() {
-        sendPrompt()
+        if isProcessingActive {
+            cancelActiveTurn()
+        } else {
+            sendPrompt()
+        }
+    }
+
+    private var isProcessingActive: Bool {
+        if mode == .selfHost, let tab = activeRpcTab {
+            if tab.status == .processing { return true }
+            if let session = tab.session, session.isStreaming { return true }
+        }
+        return keyTape.agentStatus == .processing
+    }
+
+    private func updateSendButton() {
+        let processing = isProcessingActive
+        sendButton.title = processing ? "■   Cancel" : "⌘ ↵   Send"
+        if processing {
+            sendButton.fillColor = NSColor(calibratedRed: 0.23, green: 0.11, blue: 0.12, alpha: 1)
+            sendButton.textColor = NSColor(calibratedRed: 1.0, green: 0.56, blue: 0.56, alpha: 1)
+        } else if isCompact {
+            // Matches the compact mockup's blue pill.
+            sendButton.fillColor = NSColor(calibratedRed: 0.15, green: 0.39, blue: 0.92, alpha: 1)
+            sendButton.textColor = .white
+        } else {
+            sendButton.fillColor = Theme.inputRaised
+            sendButton.textColor = Theme.inputText
+        }
+        sendButton.toolTip = processing
+            ? "Cancel the running turn (Esc)"
+            : "Send the prompt (Return)"
+        sendButton.needsDisplay = true
+    }
+
+    private func cancelActiveTurn() {
+        switch mode {
+        case .selfHost:
+            guard let tab = activeRpcTab, let session = tab.session else { return }
+            guard tab.status == .processing || session.isStreaming else { return }
+            session.abort()
+            statusLabel.stringValue = "CANCELLING…"
+            statusLabel.textColor = .systemOrange
+        case .tty:
+            guard let injector else { return }
+            _ = injector.inject("\u{1b}")
+        case .terminal, .selfTerminal:
+            guard let terminalInjector else { return }
+            _ = terminalInjector.sendKey(53)
+        case .apple:
+            guard let appleInjector else { return }
+            _ = appleInjector.sendKey(53)
+        case .dry:
+            return
+        }
+        focusOverlay()
     }
 
     @objc private func attachImage() {
@@ -6420,7 +6962,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     @objc private func copyResponse() {
         let text: String
         if mode == .selfHost, let tab = activeRpcTab {
-            text = tab.responseText
+            text = displayText(for: tab)
         } else {
             text = responseText
         }
@@ -6434,7 +6976,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     @objc private func downloadResponse() {
         let text: String
         if mode == .selfHost, let tab = activeRpcTab {
-            text = tab.responseText
+            text = displayText(for: tab)
         } else {
             text = responseText
         }
@@ -6596,6 +7138,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     @objc func toggleMinimize() {
+        if isCompact { exitCompact() }
         isMinimized.toggle()
         window.minSize = isMinimized ? NSSize(width: 300, height: collapsedHeight) : baseMinSize
 
@@ -6624,6 +7167,179 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         layoutViews()
         keyTape.needsDisplay = true
         focusOverlay()
+    }
+
+    // MARK: - Compact textbox mode
+
+    /// Toggle the capsule-only view: one rounded textbox on a transparent
+    /// window, with a small restore control above its right end.
+    @objc func toggleCompact() {
+        if isCompact {
+            exitCompact()
+        } else {
+            enterCompact()
+        }
+    }
+
+    private static let compactHeight: CGFloat = 96
+
+    private func setCompactChrome(_ compact: Bool) {
+        guard let container = window.contentView else { return }
+        container.layer?.backgroundColor = compact
+            ? NSColor.clear.cgColor
+            : Theme.card.cgColor
+        container.layer?.borderWidth = compact ? 0 : 1
+        container.layer?.borderColor = Theme.border.cgColor
+    }
+
+    private func enterCompact() {
+        guard !isCompact else { return }
+        if isMinimized { toggleMinimize() }
+        if speech.isListening { stopVoice() }
+
+        compactRestoreFrame = window.frame
+        expandedHeight = window.frame.height
+        isCompact = true
+        setCompactChrome(true)
+
+        // Compact capsules live at the bottom-centre of the screen, with a
+        // little breathing room above the Dock / screen edge so they never
+        // hide behind it. `visibleFrame` already excludes the Dock and menu bar.
+        let height = Self.compactHeight
+        let screen = window.screen ?? NSScreen.main
+        let visible = screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let bottomPadding: CGFloat = 28
+        let maxWidth = max(420, visible.width - 48)
+        let width = min(max(420, window.frame.width), maxWidth)
+        let frame = NSRect(
+            x: visible.midX - width / 2,
+            y: visible.minY + bottomPadding,
+            width: width,
+            height: height
+        )
+        window.minSize = NSSize(width: 420, height: height)
+        window.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: height)
+        window.setFrame(frame, display: true)
+        debugLog(
+            "compact frame=\(NSStringFromRect(frame)) "
+                + "visible=\(NSStringFromRect(visible))"
+        )
+
+        layoutViews()
+        updateMinimizeButton()
+        updateSendButton()
+        focusOverlay()
+        debugLog("compact mode on")
+    }
+
+    private func exitCompact() {
+        guard isCompact else { return }
+        isCompact = false
+        keyTape.isCompact = false
+        setCompactChrome(false)
+        window.maxSize = NSSize(
+            width: CGFloat.greatestFiniteMagnitude,
+            height: CGFloat.greatestFiniteMagnitude
+        )
+        window.minSize = baseMinSize
+
+        if let frame = compactRestoreFrame {
+            expandedHeight = frame.height
+            window.setFrame(frame, display: true)
+        }
+        compactRestoreFrame = nil
+
+        layoutViews()
+        updateMinimizeButton()
+        updateSendButton()
+        focusOverlay()
+        debugLog("compact mode off")
+    }
+
+    private static func capsuleMask(size: NSSize) -> NSImage? {
+        guard size.width > 1, size.height > 1 else { return nil }
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.black.setFill()
+        NSBezierPath(
+            roundedRect: NSRect(origin: .zero, size: size),
+            xRadius: size.height / 2,
+            yRadius: size.height / 2
+        ).fill()
+        image.unlockFocus()
+        return image
+    }
+
+    private func layoutCompact(width: CGFloat, height: CGFloat) {
+        let capsuleHeight = min(72, max(56, height - 32))
+        keyTape.frame = NSRect(x: 8, y: 0, width: width - 16, height: capsuleHeight)
+        keyTape.isCompact = true
+        keyTape.alphaValue = 1
+
+        let micSize = min(40, capsuleHeight - 14)
+        voiceButton.frame = NSRect(
+            x: 13,
+            y: (capsuleHeight - micSize) / 2,
+            width: micSize,
+            height: micSize
+        )
+        voiceButton.layer?.cornerRadius = micSize / 2
+        voiceButton.isHidden = false
+
+        let sendWidth: CGFloat = 104
+        let sendHeight: CGFloat = 38
+        let sendX = keyTape.bounds.width - 12 - sendWidth
+        sendButton.frame = NSRect(
+            x: sendX,
+            y: (capsuleHeight - sendHeight) / 2,
+            width: sendWidth,
+            height: sendHeight
+        )
+        sendButton.isHidden = false
+
+        let pidWidth: CGFloat = 84
+        compactPidLabel.stringValue = pidLabel.stringValue
+        compactPidLabel.frame = NSRect(
+            x: sendX - 8 - pidWidth,
+            y: (capsuleHeight - 18) / 2,
+            width: pidWidth,
+            height: 18
+        )
+        compactPidLabel.isHidden = false
+        compactBackdrop.frame = keyTape.frame
+        compactBackdrop.layer?.cornerRadius = capsuleHeight / 2
+        compactBackdrop.layer?.masksToBounds = true
+        compactBackdrop.maskImage = Self.capsuleMask(size: keyTape.frame.size)
+        compactBackdrop.isHidden = false
+        keyTape.compactRightInset = 13 + sendWidth + 8 + pidWidth + 14
+        keyTape.statusRightInset = keyTape.compactRightInset
+
+        imageButton.isHidden = true
+        attachButton.isHidden = true
+        attachmentChip.isHidden = true
+
+        let hiddenViews: [NSView] = [
+            tabBar, statusLabel, targetLabel, terminalTitleLabel,
+            directoryPopup, modelPopup, pidLabel, sessionIcon, sessionLabel,
+            sessionPopup, newSessionButton, headerDivider,
+            responseButton, responseDivider, queryPopup, thinkingButton, responseWebView,
+            responseCopyButton, responseDownloadButton, responseExpandButton,
+            terminalButton, panelButton, hideButton, compactButton,
+            minimizeButton, closeButton, topDivider,
+        ]
+        for view in hiddenViews { view.isHidden = true }
+        for tab in rpcTabs { tab.webView.isHidden = true }
+
+        compactRestoreButton.frame = NSRect(
+            x: width - 44,
+            y: capsuleHeight + 2,
+            width: 26,
+            height: 26
+        )
+        compactRestoreButton.isHidden = false
+
+        keyTape.needsDisplay = true
+        keyTape.needsLayout = true
     }
 
     @objc func toggleResponse() {
@@ -6659,7 +7375,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     /// The user owns the window height. The only adjustment made here is to
     /// make room for the response panel when the window is too short for it.
     private func syncResponsePanelHeight() {
-        guard responseExpanded, !isMinimized else { return }
+        guard responseExpanded, !isMinimized, !isCompact else { return }
         var frame = window.frame
         let target = max(comfortableHeight, window.minSize.height)
         guard frame.height < target else { return }
@@ -6679,6 +7395,21 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         let width = container.bounds.width
         let height = container.bounds.height
+
+        if isCompact {
+            layoutCompact(width: width, height: height)
+            window.invalidateCursorRects(for: container)
+            updateResponseButton()
+            updateSendButton()
+            return
+        }
+
+        compactRestoreButton.isHidden = true
+        compactPidLabel.isHidden = true
+        compactBackdrop.isHidden = true
+        keyTape.isCompact = false
+        voiceButton.layer?.cornerRadius = 10
+
         let tabBarExtra: CGFloat = mode == .selfHost ? Theme.tabStripHeight : 0
         let headerBase = height - tabBarExtra
         // In RPC mode the collapsed window shows only the tab strip, so the
@@ -6717,19 +7448,20 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         let iconSize: CGFloat = 30
         let iconGap: CGFloat = 4
-        let iconCount = 5
+        let iconCount = 6
         let clusterWidth = CGFloat(iconCount) * iconSize + CGFloat(iconCount - 1) * iconGap
         var iconX = width - 14 - clusterWidth
         let iconY = height - Theme.tabStripHeight + (Theme.tabStripHeight - iconSize) / 2
-        for button in [terminalButton, panelButton, hideButton, minimizeButton, closeButton] {
+        for button in [terminalButton, panelButton, hideButton, compactButton, minimizeButton, closeButton] {
             button.frame = NSRect(x: iconX, y: iconY, width: iconSize, height: iconSize)
             iconX += iconSize + iconGap
         }
         panelButton.isHidden = mode != .selfHost
         terminalButton.isHidden = false
+        compactButton.isHidden = false
         topDivider.isHidden = mode != .selfHost
         topDivider.frame = NSRect(
-            x: hideButton.frame.minX - 8,
+            x: minimizeButton.frame.minX - 8,
             y: iconY + 6,
             width: 1,
             height: iconSize - 12
@@ -6886,10 +7618,19 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             height: responseIcon
         )
 
+        let thinkingWidth: CGFloat = 30
+        let thinkingX = responseIconX - 12 - thinkingWidth
+        thinkingButton.frame = NSRect(
+            x: thinkingX,
+            y: responseRowY + 3,
+            width: thinkingWidth,
+            height: 28
+        )
+
         let queryX: CGFloat = 152
-        let queryWidth = max(140, responseIconX - 12 - queryX)
+        let queryWidth = max(120, thinkingX - 8 - queryX)
         queryPopup.frame = NSRect(x: queryX, y: responseRowY, width: queryWidth, height: 34)
-        queryPopup.isHidden = isMinimized || sessionQueries.isEmpty
+        queryPopup.isHidden = isMinimized || isCompact || sessionQueries.isEmpty
 
         if mode == .selfHost {
             responseWebView.isHidden = true
@@ -6914,6 +7655,20 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         window.invalidateCursorRects(for: container)
         updateResponseButton()
+        updateSendButton()
+    }
+
+    /// Dev-only: inject a prompt into the active tab (PI_OVERLAY_TEST_PROMPT).
+    func sendPromptForTesting(_ text: String) {
+        if ProcessInfo.processInfo.environment["PI_OVERLAY_TEST_THINKING"] == "1",
+           let tab = activeRpcTab {
+            tab.showThinking = true
+            applyThinkingButtonState()
+            ensureThinkingPanelOpen(tab)
+        }
+        keyTape.setText(text)
+        rawText = text
+        sendPrompt()
     }
 
     /// Dev-only: render the window to a PNG so the theme can be checked
@@ -6955,8 +7710,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         activeRpcTabID = tab.id
         activeDirectory = tab.directory!
 
+        let processing = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_PROCESSING"] == "1"
+        tab.status = processing ? .processing : .done
         keyTape.setText("")
-        keyTape.agentStatus = .done
+        keyTape.agentStatus = processing ? .processing : .done
         keyTape.needsDisplay = true
 
         statusLabel.stringValue = "READY"
@@ -6982,6 +7739,31 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         directoryPopup.title = "📁 pi-overlay-extension"
         directoryPopup.toolTip = tab.directory?.path
         pidLabel.stringValue = "pi 6288"
+        if ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_ERROR"] == "1" {
+            showAssistantFailure(
+                "Request timed out after 120s while waiting for the provider.",
+                title: "Request failed",
+                tab: tab,
+                isActive: true
+            )
+        }
+        if ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_THINKING"] == "1" {
+            tab.showThinking = true
+            tab.thinkingText = "The user is asking about the power stage. I should cover the two-phase buck, inductor ripple and the feedback divider return."
+            tab.queries[0].thinking = tab.thinkingText
+            debugLog("preview thinking display=\(displayText(for: tab).prefix(300))")
+            responseExpanded = true
+            responseUserCollapsed = false
+            tab.responseExpanded = true
+            tab.responseUserCollapsed = false
+            renderTabResponse(tab)
+        }
+        if ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_COMPACT"] == "1" {
+            enterCompact()
+        } else if ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_COMPACT_EXIT"] == "1" {
+            enterCompact()
+            exitCompact()
+        }
         rebuildDirectoryMenu()
         rebuildModelMenu()
         rebuildSessionMenu()
@@ -7111,7 +7893,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     func windowDidResize(_ notification: Notification) {
-        if !isMinimized { expandedHeight = window.frame.height }
+        if !isMinimized, !isCompact { expandedHeight = window.frame.height }
         layoutViews()
     }
 
@@ -7187,10 +7969,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             return true
         }
 
-        // Escape aborts a running RPC turn (self mode).
+        // Escape cancels the running turn (RPC abort, or Escape in a TTY).
         if event.keyCode == 53 {
-            if mode == .selfHost, let session = activeRpcTab?.session, session.isStreaming {
-                session.abort()
+            if isProcessingActive {
+                cancelActiveTurn()
                 return true
             }
             return false
@@ -7271,6 +8053,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         controller.keyTape.needsDisplay = true
         controller.startInitialSelfSession()
         controller.prepareInput()
+        if let prompt = ProcessInfo.processInfo.environment["PI_OVERLAY_TEST_PROMPT"],
+           !prompt.isEmpty {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+                self.controller.sendPromptForTesting(prompt)
+            }
+        }
         controller.installStatusItem()
         controller.setupNotifications()
 
