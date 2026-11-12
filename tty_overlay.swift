@@ -677,6 +677,8 @@ final class DirectoryStore {
     private let defaults = UserDefaults.standard
     private let lastKey = "piOverlay.lastDirectory"
     private let recentsKey = "piOverlay.recentDirectories"
+    private let remoteRecentsKey = "piOverlay.recentRemoteLocations"
+    private let remoteLastKey = "piOverlay.lastRemoteLocation"
     private let maxRecents = 10
 
     func normalize(_ raw: String) -> URL? {
@@ -710,6 +712,40 @@ final class DirectoryStore {
             paths = Array(paths.prefix(maxRecents))
         }
         defaults.set(paths, forKey: recentsKey)
+    }
+
+    // MARK: - Remote recents
+
+    /// Remote folders are remembered as `ssh://host[:port]/abs/path` strings,
+    /// so one array holds them without touching the local filesystem checks
+    /// that `recents` applies.
+    func remoteRecents() -> [(host: RemoteHost, path: String)] {
+        let raw = defaults.stringArray(forKey: remoteRecentsKey) ?? []
+        return raw.compactMap { entry in
+            let decoded = TabLocationCodec.decode(entry)
+            guard let host = decoded.host, !decoded.path.isEmpty else { return nil }
+            return (host, decoded.path)
+        }
+    }
+
+    func addRemoteRecent(host: RemoteHost, path: String) {
+        let key = TabLocationCodec.encode(host: host, path: path)
+        defaults.set(key, forKey: remoteLastKey)
+
+        var entries = defaults.stringArray(forKey: remoteRecentsKey) ?? []
+        entries.removeAll { $0 == key }
+        entries.insert(key, at: 0)
+        if entries.count > maxRecents {
+            entries = Array(entries.prefix(maxRecents))
+        }
+        defaults.set(entries, forKey: remoteRecentsKey)
+    }
+
+    var lastRemote: (host: RemoteHost, path: String)? {
+        guard let raw = defaults.string(forKey: remoteLastKey) else { return nil }
+        let decoded = TabLocationCodec.decode(raw)
+        guard let host = decoded.host else { return nil }
+        return (host, decoded.path)
     }
 
     func resolveInitialDirectory(cliDirectory: String?) -> URL {
@@ -948,16 +984,22 @@ final class ProfileStore {
                 tabLine = String(tabLine.dropFirst()).trimmingCharacters(in: .whitespaces)
             }
 
-            var session: String?
+            var rawSession: String?
             if let separator = tabLine.firstIndex(of: "\t") {
                 let suffix = String(tabLine[tabLine.index(after: separator)...])
                     .trimmingCharacters(in: .whitespaces)
-                session = suffix.isEmpty
-                    ? nil
-                    : (suffix as NSString).expandingTildeInPath
+                rawSession = suffix.isEmpty ? nil : suffix
                 tabLine = String(tabLine[..<separator]).trimmingCharacters(in: .whitespaces)
             }
             guard !tabLine.isEmpty else { continue }
+
+            // `ssh://host/abs/path` is a remote tab; anything else is local and
+            // keeps the historical `~` expansion.
+            let location = TabLocationCodec.decode(tabLine)
+            guard !location.path.isEmpty else { continue }
+            let session = rawSession.map { value -> String in
+                location.host == nil ? (value as NSString).expandingTildeInPath : value
+            }
 
             if current == nil {
                 profiles.append(OverlayProfile(name: Self.defaultName, tabs: []))
@@ -965,7 +1007,7 @@ final class ProfileStore {
             }
             guard let index = current else { continue }
             profiles[index].tabs.append(ProfileTab(
-                path: (tabLine as NSString).expandingTildeInPath,
+                path: TabLocationCodec.encode(host: location.host, path: location.path),
                 active: tabActive,
                 session: session
             ))
@@ -1043,6 +1085,17 @@ struct PiSessionInfo {
 /// the encoding is the absolute cwd with a single leading slash removed and
 /// every `/`, `\` and `:` replaced by `-` (see pi's session-manager).
 enum PiSessionStore {
+    /// `--<encoded-cwd>--`, pi's on-disk grouping name for a project folder.
+    static func encodedDirectoryName(for path: String) -> String {
+        var stripped = path
+        if stripped.hasPrefix("/") { stripped.removeFirst() }
+        return "--"
+            + stripped.replacingOccurrences(of: "/", with: "-")
+                .replacingOccurrences(of: "\\", with: "-")
+                .replacingOccurrences(of: ":", with: "-")
+            + "--"
+    }
+
     static func directory(for cwd: URL) -> URL {
         let environment = ProcessInfo.processInfo.environment
 
@@ -1060,17 +1113,9 @@ enum PiSessionStore {
         }
 
         let resolved = cwd.standardizedFileURL.resolvingSymlinksInPath().path
-        var stripped = resolved
-        if stripped.hasPrefix("/") { stripped.removeFirst() }
-        let encoded = "--"
-            + stripped.replacingOccurrences(of: "/", with: "-")
-                .replacingOccurrences(of: "\\", with: "-")
-                .replacingOccurrences(of: ":", with: "-")
-            + "--"
-
         return agentDirectory
             .appendingPathComponent("sessions")
-            .appendingPathComponent(encoded)
+            .appendingPathComponent(encodedDirectoryName(for: resolved))
     }
 
     /// Most recently active sessions first, capped at `limit`.
@@ -1105,40 +1150,46 @@ enum PiSessionStore {
 
     /// Reads the newest `session_info` name from the tail and the first user
     /// message from the head, without loading whole (possibly multi-MB) files.
-    private static func summarize(_ path: String) -> (name: String?, preview: String?)? {
+    /// `RemotePiSessionStore` feeds the same parser with fetched head/tail
+    /// bytes, so local and remote session rows label sessions identically.
+    static func summarize(_ path: String) -> (name: String?, preview: String?)? {
         guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
         defer { try? handle.close() }
 
         let size = (try? handle.seekToEnd()) ?? 0
         guard size > 0 else { return nil }
 
-        // Name: latest session_info in the last 96 KB.
         let tailLength = min(size, 96 * 1024)
         try? handle.seek(toOffset: size - tailLength)
+        let tail = (try? handle.readToEnd()) ?? Data()
+
+        try? handle.seek(toOffset: 0)
+        let head = (try? handle.read(upToCount: Int(min(size, 64 * 1024)))) ?? Data()
+
+        return summarize(head: head, tail: tail)
+    }
+
+    static func summarize(head: Data, tail: Data) -> (name: String?, preview: String?) {
+        // Name: latest session_info in the tail.
         var name: String?
-        if let tail = try? handle.readToEnd() {
-            for line in tail.split(separator: 0x0A) {
-                guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                      object["type"] as? String == "session_info",
-                      let value = object["name"] as? String else { continue }
-                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-                name = trimmed.isEmpty ? nil : trimmed
-            }
+        for line in tail.split(separator: 0x0A) {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  object["type"] as? String == "session_info",
+                  let value = object["name"] as? String else { continue }
+            let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            name = trimmed.isEmpty ? nil : trimmed
         }
 
-        // Preview: first user message in the first 64 KB.
+        // Preview: first user message in the head.
         var preview: String?
-        try? handle.seek(toOffset: 0)
-        if let head = try? handle.read(upToCount: Int(min(size, UInt64(64 * 1024)))) {
-            for line in head.split(separator: 0x0A) {
-                guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
-                      object["type"] as? String == "message",
-                      let message = object["message"] as? [String: Any],
-                      message["role"] as? String == "user",
-                      let text = messageText(message) else { continue }
-                preview = text
-                break
-            }
+        for line in head.split(separator: 0x0A) {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                  object["type"] as? String == "message",
+                  let message = object["message"] as? [String: Any],
+                  message["role"] as? String == "user",
+                  let text = messageText(message) else { continue }
+            preview = text
+            break
         }
 
         return (name, preview.map(condense))
@@ -1382,8 +1433,13 @@ final class PiLauncher {
 
 enum PiEnvironment {
     private static var cached: [String: String]?
+    private static let lock = NSLock()
 
     static func loginShell() -> [String: String] {
+        // Remote session listing and tab launches can ask concurrently from
+        // background queues; only the first call needs to run the shell.
+        lock.lock()
+        defer { lock.unlock() }
         if let cached { return cached }
 
         var environment = ProcessInfo.processInfo.environment
@@ -1414,11 +1470,670 @@ enum PiEnvironment {
 }
 
 // ---------------------------------------------------------------------------
+// Remote hosts (RPC over SSH)
+// ---------------------------------------------------------------------------
+
+/// An SSH destination: either a `~/.ssh/config` alias or `user@host`, with an
+/// optional port. The overlay never handles credentials itself; it runs the
+/// system `ssh`, which uses the user's keys and config.
+struct RemoteHost: Equatable, Hashable {
+    let name: String
+    let port: Int?
+
+    var display: String { port.map { "\(name):\($0)" } ?? name }
+
+    static func parse(_ raw: String) -> RemoteHost? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              !trimmed.hasPrefix("-"),
+              !trimmed.contains(where: { $0.isWhitespace || $0.isNewline }) else { return nil }
+
+        // Bracketed IPv6: [::1] or [::1]:2222
+        if trimmed.hasPrefix("[") {
+            guard let close = trimmed.firstIndex(of: "]") else { return nil }
+            let host = String(trimmed[trimmed.index(after: trimmed.startIndex)..<close])
+            guard !host.isEmpty else { return nil }
+            let rest = trimmed[trimmed.index(after: close)...]
+            if rest.hasPrefix(":") {
+                guard let port = Int(rest.dropFirst()) else { return nil }
+                return RemoteHost(name: host, port: port)
+            }
+            return rest.isEmpty ? RemoteHost(name: host, port: nil) : nil
+        }
+
+        // user@host:2222 — only treat the suffix as a port when it is numeric
+        // and there is no earlier colon (which would be a bare IPv6 address).
+        if let colon = trimmed.lastIndex(of: ":"), !trimmed[..<colon].contains(":") {
+            let portText = trimmed[trimmed.index(after: colon)...]
+            if !portText.isEmpty,
+               portText.allSatisfy(\.isNumber),
+               let port = Int(portText) {
+                return RemoteHost(name: String(trimmed[..<colon]), port: port)
+            }
+        }
+        return RemoteHost(name: trimmed, port: nil)
+    }
+}
+
+/// `profiles.conf` round-trip for a tab's location. Local tabs keep the plain
+/// path they always had; remote tabs use `ssh://host[:port]/abs/path` so the
+/// existing `path<TAB>session` column shape is unchanged.
+enum TabLocationCodec {
+    static func encode(host: RemoteHost?, path: String) -> String {
+        guard let host else { return path }
+        let authority = host.port.map { "\(host.name):\($0)" } ?? host.name
+        var remotePath = path
+        if remotePath.hasPrefix("~") {
+            remotePath = "/" + remotePath
+        } else if !remotePath.hasPrefix("/") {
+            remotePath = "/" + remotePath
+        }
+        return "ssh://\(authority)\(remotePath)"
+    }
+
+    static func decode(_ raw: String) -> (host: RemoteHost?, path: String) {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.lowercased().hasPrefix("ssh://") else {
+            return (nil, (trimmed as NSString).expandingTildeInPath)
+        }
+
+        let rest = String(trimmed.dropFirst("ssh://".count))
+        guard let slash = rest.firstIndex(of: "/") else { return (nil, rest) }
+        let authority = String(rest[..<slash])
+        var path = String(rest[slash...])
+        // `ssh://host/~/code` means `~/code` on the remote side.
+        if path.hasPrefix("/~") { path.removeFirst() }
+        guard let host = RemoteHost.parse(authority) else { return (nil, path) }
+        return (host, path)
+    }
+}
+
+/// Runs short-lived commands on a remote host (`pi` lookup, directory
+/// validation, session listing). The long-lived RPC stream has its own
+/// transport in `RpcSession`; these helpers never touch that stdin.
+enum RemotePi {
+    struct Result {
+        let status: Int32
+        let stdout: Data
+        let stderr: String
+        var ok: Bool { status == 0 }
+    }
+
+    static var sshBinary: String {
+        let env = ProcessInfo.processInfo.environment["PI_OVERLAY_SSH"]
+        if let env, !env.isEmpty { return (env as NSString).expandingTildeInPath }
+        return "/usr/bin/ssh"
+    }
+
+    /// Login shell used for one-shot remote commands. It gives us the remote
+    /// user's PATH (Homebrew, ~/.local/bin, nvm) and their exported variables;
+    /// it never carries the local environment. May contain arguments
+    /// (`bash -l`); each word is quoted separately.
+    static var remoteShell: String {
+        let env = ProcessInfo.processInfo.environment["PI_OVERLAY_REMOTE_SHELL"]
+        if let env, !env.isEmpty { return env }
+        return "sh"
+    }
+
+    static var remotePiOverride: String? {
+        guard let value = ProcessInfo.processInfo.environment["PI_OVERLAY_REMOTE_PI"],
+              !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// Shell prologue that expands a leading `~` in the variable `name`.
+    /// The overlay single-quotes every remote path (so the shell cannot expand
+    /// it), and `cd '~/code'` would otherwise look for a literal `~` directory.
+    static func homeExpansion(for name: String) -> String {
+        """
+        case "$\(name)" in
+          "~") \(name)="$HOME" ;;
+          "~/"*) \(name)="$HOME/${\(name)#\\~/}" ;;
+        esac
+        """
+    }
+
+    /// Shared SSH options: no pty (so stdout stays raw JSONL), fail instead of
+    /// prompting (a GUI app has no tty), keepalives, and connection reuse so
+    /// several tabs to one host share a single TCP connection.
+    static func sshArguments(host: RemoteHost, extra: [String] = []) -> [String] {
+        var args = [
+            "-T",
+            "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=10",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3",
+        ]
+        if let port = host.port {
+            args.append(contentsOf: ["-p", String(port)])
+        }
+        if ProcessInfo.processInfo.environment["PI_OVERLAY_SSH_CONTROL"] != "0" {
+            // Keep the path short: ControlPath must fit in a unix socket path
+            // (104 bytes on macOS) including the 40-char `%C` hash.
+            let controlPath = "/tmp/pi-overlay-ssh-%C"
+            args.append(contentsOf: [
+                "-o", "ControlMaster=auto",
+                "-o", "ControlPath=\(controlPath)",
+                "-o", "ControlPersist=10m",
+            ])
+        }
+        args.append(host.name)
+        args.append(contentsOf: extra)
+        return args
+    }
+
+    /// ssh joins its remote arguments with spaces before handing them to the
+    /// server's shell, so the script has to be quoted *inside* one argument.
+    /// Passing `[shell, "-lc", script]` as separate argv loses the quoting and
+    /// runs only the first word of the script (`sh -lc cd …` → `cd` with no
+    /// argument, i.e. the remote home).
+    static func remoteCommand(_ script: String) -> String {
+        let shellWords = remoteShell
+            .split(whereSeparator: { $0 == " " || $0 == "\t" })
+            .map { PiLauncher.shellQuote(String($0)) }
+            .joined(separator: " ")
+        return "\(shellWords) -lc \(PiLauncher.shellQuote(script))"
+    }
+
+    /// Runs `script` in the remote login shell and captures stdout/stderr.
+    /// Uses temp files so a large listing cannot deadlock on a full pipe.
+    /// Blocking: call from a background queue only.
+    static func run(
+        host: RemoteHost,
+        script: String,
+        timeout: TimeInterval = 25
+    ) -> Result {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: sshBinary)
+        process.arguments = sshArguments(
+            host: host,
+            extra: [remoteCommand(script)]
+        )
+        // The ssh *client* needs the local env for HOME/PATH/SSH_AUTH_SOCK. The
+        // remote pi's environment comes from the remote login shell instead.
+        process.environment = PiEnvironment.loginShell()
+
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pi-overlay-remote-\(UUID().uuidString)", isDirectory: true)
+        let outURL = base.appendingPathComponent("stdout")
+        let errURL = base.appendingPathComponent("stderr")
+        try? FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: outURL.path, contents: nil)
+        FileManager.default.createFile(atPath: errURL.path, contents: nil)
+        let outHandle = try? FileHandle(forWritingTo: outURL)
+        let errHandle = try? FileHandle(forWritingTo: errURL)
+        process.standardOutput = outHandle ?? FileHandle.nullDevice
+        process.standardError = errHandle ?? FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+
+        var status: Int32 = -1
+        do {
+            try process.run()
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning {
+                debugLog("remote: ssh \(host.display) timed out after \(Int(timeout))s")
+                process.terminate()
+                process.waitUntilExit()
+            } else {
+                process.waitUntilExit()
+                status = process.terminationStatus
+            }
+        } catch {
+            debugLog("remote: ssh \(host.display) launch failed: \(error)")
+        }
+
+        try? outHandle?.close()
+        try? errHandle?.close()
+        let stdout = (try? Data(contentsOf: outURL)) ?? Data()
+        let stderr = ((try? String(contentsOf: errURL, encoding: .utf8)) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        try? FileManager.default.removeItem(at: base)
+        return Result(status: status, stdout: stdout, stderr: stderr)
+    }
+
+    /// Resolves the remote working directory (`cd` + `pwd -P`) and looks for
+    /// `pi` before a tab is created, so a typo becomes an alert instead of a
+    /// dead tab.
+    static func prepare(
+        host: RemoteHost,
+        path: String
+    ) -> (path: String, pi: String?, error: String) {
+        let failure = PiLauncher.shellQuote("pi-overlay: cannot cd to \(path)")
+        let script = """
+        target=\(PiLauncher.shellQuote(path))
+        \(homeExpansion(for: "target"))
+        cd "$target" || { printf '%s\\n' \(failure) >&2; exit 9; }
+        printf 'CWD\\t%s\\n' "$(pwd -P)"
+        printf 'PI\\t%s\\n' "$(command -v pi 2>/dev/null || true)"
+        """
+        let result = run(host: host, script: script, timeout: 20)
+        guard result.ok else {
+            return (path, nil, result.stderr.isEmpty
+                ? "ssh exited with status \(result.status)"
+                : result.stderr)
+        }
+        let text = String(data: result.stdout, encoding: .utf8) ?? ""
+        var resolved: String?
+        var pi: String?
+        for line in text.split(separator: "\n") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 2 else { continue }
+            switch fields[0] {
+            case "CWD": resolved = String(fields[1])
+            case "PI": pi = String(fields[1])
+            default: continue
+            }
+        }
+        guard let resolved, !resolved.isEmpty else {
+            return (path, nil, "no working directory reported")
+        }
+        return (resolved, pi, "")
+    }
+
+    /// Lists the immediate subdirectories of `path` for the folder browser.
+    /// One ssh round trip; hidden folders are skipped (the path field can still
+    /// be used to jump into one).
+    static func listDirectories(
+        host: RemoteHost,
+        path: String
+    ) -> (path: String, dirs: [String], error: String) {
+        let failure = PiLauncher.shellQuote("pi-overlay: cannot cd to \(path)")
+        let script = """
+        target=\(PiLauncher.shellQuote(path))
+        \(homeExpansion(for: "target"))
+        cd "$target" 2>/dev/null || { printf '%s\\n' \(failure) >&2; exit 9; }
+        printf 'CWD\\t%s\\n' "$(pwd -P)"
+        for d in */; do
+          [ -d "$d" ] || continue
+          printf 'D\\t%s\\n' "${d%/}"
+        done
+        """
+        let result = run(host: host, script: script, timeout: 20)
+        guard result.ok else {
+            return (path, [], result.stderr.isEmpty
+                ? "ssh exited with status \(result.status)"
+                : result.stderr)
+        }
+        let text = String(data: result.stdout, encoding: .utf8) ?? ""
+        var resolved: String?
+        var dirs: [String] = []
+        for line in text.split(separator: "\n") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 2 else { continue }
+            switch fields[0] {
+            case "CWD": resolved = String(fields[1])
+            case "D": dirs.append(String(fields[1]))
+            default: break
+            }
+        }
+        guard let resolved, !resolved.isEmpty else {
+            return (path, [], "no working directory reported")
+        }
+        return (resolved, dirs, "")
+    }
+}
+
+/// Remote counterpart of `PiSessionStore.list`. One SSH round trip per refresh:
+/// the remote script lists the project's session files (`ls -t`, newest first)
+/// and returns the bounded head/tail bytes base64-encoded. Parsing stays local
+/// and shared with the on-disk reader, so labels look identical.
+enum RemotePiSessionStore {
+    static func list(host: RemoteHost, path: String, limit: Int = 40) -> [PiSessionInfo] {
+        let script = """
+        target=\(PiLauncher.shellQuote(path))
+        \(RemotePi.homeExpansion(for: "target"))
+        cd "$target" 2>/dev/null || exit 0
+        cwd=$(pwd -P)
+        enc=$(printf '%s' "$cwd" | sed 's|^/||; s|[/\\\\:]|-|g')
+        dir="${PI_CODING_AGENT_SESSION_DIR:-}"
+        if [ -z "$dir" ]; then
+          base="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"
+          dir="$base/sessions/--$enc--"
+        fi
+        [ -d "$dir" ] || exit 0
+        b64() {
+          if command -v base64 >/dev/null 2>&1; then base64 | tr -d '\\n\\r'; else openssl base64 -A 2>/dev/null; fi
+        }
+        n=0
+        for f in $(ls -t "$dir"/*.jsonl 2>/dev/null); do
+          n=$((n+1)); [ "$n" -gt \(limit) ] && break
+          mt=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)
+          size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+          head=$(head -c 65536 "$f" 2>/dev/null | b64)
+          tail=$(tail -c 98304 "$f" 2>/dev/null | b64)
+          printf 'F\\t%s\\t%s\\t%s\\t%s\\t%s\\n' "$f" "$mt" "$size" "$head" "$tail"
+        done
+        """
+
+        let result = RemotePi.run(host: host, script: script)
+        guard result.ok else {
+            if !result.stderr.isEmpty {
+                debugLog("remote sessions \(host.display): \(result.stderr)")
+            }
+            return []
+        }
+        guard let text = String(data: result.stdout, encoding: .utf8) else { return [] }
+
+        var infos: [PiSessionInfo] = []
+        for line in text.split(separator: "\n") {
+            let fields = line.split(separator: "\t", omittingEmptySubsequences: false)
+            guard fields.count >= 6, fields[0] == "F" else { continue }
+            let filePath = String(fields[1])
+            let modified = TimeInterval(fields[2]).map(Date.init(timeIntervalSince1970:))
+                ?? Date.distantPast
+            let head = Data(base64Encoded: String(fields[4])) ?? Data()
+            let tail = Data(base64Encoded: String(fields[5])) ?? Data()
+            if head.isEmpty && tail.isEmpty { continue }
+            let summary = PiSessionStore.summarize(head: head, tail: tail)
+            infos.append(PiSessionInfo(
+                path: filePath,
+                name: summary.name,
+                preview: summary.preview,
+                modified: modified
+            ))
+        }
+        let sorted = infos.sorted { $0.modified > $1.modified }
+        if sorted.isEmpty, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            debugLog(
+                "remote sessions \(host.display): no parseable records; "
+                    + "first line: \(String(text.prefix(120)))"
+            )
+        } else {
+            debugLog("remote sessions \(host.display):\(path) count=\(sorted.count)")
+        }
+        return sorted
+    }
+}
+
+/// NSTableView that reports double-clicks from `mouseDown` rather than through
+/// `doubleAction`. View-based cells can consume the second click, which made
+/// `doubleAction` unreliable in the folder browser (the row was selected but
+/// the action never fired).
+final class FolderTableView: NSTableView {
+    var onDoubleClickRow: ((Int) -> Void)?
+
+    override func mouseDown(with event: NSEvent) {
+        super.mouseDown(with: event)
+        guard event.clickCount >= 2 else { return }
+        let row = self.row(at: convert(event.locationInWindow, from: nil))
+        guard row >= 0 else { return }
+        onDoubleClickRow?(row)
+    }
+}
+
+/// Sheet showing the folders inside one directory on a remote host. The path
+/// field is editable, so browsing is a convenience rather than a restriction,
+/// and `~` is resolved on the remote side by `RemotePi.listDirectories`.
+final class RemoteFolderBrowser: NSObject, NSTableViewDataSource, NSTableViewDelegate, NSWindowDelegate {
+    let host: RemoteHost
+    private let panel: NSPanel
+    private let pathField: NSTextField
+    private let tableView: FolderTableView
+    private let statusLabel: NSTextField
+    private let openButton: NSButton
+    private var currentPath: String
+    private var directories: [String] = []
+    private var loadToken = 0
+    private var finished = false
+
+    var onChoose: ((String) -> Void)?
+    var onCancel: (() -> Void)?
+
+    init(host: RemoteHost, startPath: String) {
+        self.host = host
+        self.currentPath = startPath
+
+        panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 540, height: 440),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "Open remote folder — \(host.display)"
+        panel.isFloatingPanel = true
+        panel.delegate = nil
+
+        pathField = NSTextField(frame: NSRect(x: 16, y: 394, width: 420, height: 24))
+        pathField.stringValue = startPath
+        pathField.placeholderString = "/absolute/path or ~/code/project"
+        pathField.font = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
+
+        openButton = NSButton(title: "Open Folder", target: nil, action: nil)
+        tableView = FolderTableView(frame: .zero)
+        statusLabel = NSTextField(labelWithString: "")
+
+        super.init()
+
+        panel.setContentSize(NSSize(width: 540, height: 440))
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 540, height: 440))
+        content.autoresizingMask = [.width, .height]
+
+        let pathLabel = NSTextField(labelWithString: "Remote directory")
+        pathLabel.frame = NSRect(x: 16, y: 420, width: 300, height: 16)
+        pathLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        content.addSubview(pathLabel)
+
+        pathField.target = self
+        pathField.action = #selector(go)
+        pathField.autoresizingMask = [.width]
+        content.addSubview(pathField)
+
+        let goButton = NSButton(title: "Go", target: self, action: #selector(go))
+        goButton.bezelStyle = .rounded
+        goButton.frame = NSRect(x: 444, y: 392, width: 80, height: 26)
+        goButton.autoresizingMask = [.minXMargin]
+        content.addSubview(goButton)
+
+        let upButton = NSButton(title: "↑ Up", target: self, action: #selector(goUp))
+        upButton.bezelStyle = .rounded
+        upButton.frame = NSRect(x: 16, y: 360, width: 76, height: 26)
+        content.addSubview(upButton)
+
+        let enterButton = NSButton(title: "Enter", target: self, action: #selector(openSelected))
+        enterButton.bezelStyle = .rounded
+        enterButton.frame = NSRect(x: 98, y: 360, width: 76, height: 26)
+        content.addSubview(enterButton)
+
+        let hint = NSTextField(labelWithString: "Double-click a folder to open it")
+        hint.frame = NSRect(x: 184, y: 364, width: 340, height: 16)
+        hint.font = NSFont.systemFont(ofSize: 10)
+        hint.textColor = .secondaryLabelColor
+        hint.autoresizingMask = [.width]
+        content.addSubview(hint)
+
+        let scroll = NSScrollView(frame: NSRect(x: 16, y: 70, width: 508, height: 282))
+        scroll.hasVerticalScroller = true
+        scroll.borderType = .bezelBorder
+        scroll.autoresizingMask = [.width, .height]
+
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("dir"))
+        column.width = 480
+        column.resizingMask = .autoresizingMask
+        tableView.addTableColumn(column)
+        tableView.headerView = nil
+        tableView.rowHeight = 20
+        tableView.allowsEmptySelection = true
+        tableView.allowsMultipleSelection = false
+        tableView.dataSource = self
+        tableView.delegate = self
+        tableView.onDoubleClickRow = { [weak self] row in
+            self?.open(row: row)
+        }
+        scroll.documentView = tableView
+        content.addSubview(scroll)
+
+        statusLabel.frame = NSRect(x: 16, y: 46, width: 508, height: 16)
+        statusLabel.font = NSFont.systemFont(ofSize: 10)
+        statusLabel.textColor = .secondaryLabelColor
+        statusLabel.lineBreakMode = .byTruncatingMiddle
+        statusLabel.autoresizingMask = [.width]
+        content.addSubview(statusLabel)
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
+        cancel.bezelStyle = .rounded
+        cancel.keyEquivalent = "\u{1b}"
+        cancel.frame = NSRect(x: 348, y: 12, width: 82, height: 28)
+        cancel.autoresizingMask = [.minXMargin]
+        content.addSubview(cancel)
+
+        openButton.target = self
+        openButton.action = #selector(chooseCurrent)
+        openButton.bezelStyle = .rounded
+        openButton.keyEquivalent = "\r"
+        openButton.frame = NSRect(x: 436, y: 12, width: 88, height: 28)
+        openButton.autoresizingMask = [.minXMargin]
+        content.addSubview(openButton)
+
+        panel.contentView = content
+        panel.delegate = self
+        panel.initialFirstResponder = pathField
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard !finished else { return }
+        finished = true
+        onCancel?()
+    }
+
+    func begin(for parent: NSWindow) {
+        parent.beginSheet(panel)
+        load(currentPath)
+    }
+
+    // MARK: - Loading
+
+    @objc private func go() {
+        load(pathField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+
+    @objc private func goUp() {
+        let parent = (currentPath as NSString).deletingLastPathComponent
+        load(parent.isEmpty ? "/" : parent)
+    }
+
+    private func load(_ rawPath: String) {
+        var path = rawPath
+        if path.isEmpty { path = "/" }
+        pathField.stringValue = path
+        statusLabel.stringValue = "Connecting…"
+        statusLabel.textColor = .secondaryLabelColor
+
+        loadToken += 1
+        let token = loadToken
+        let host = self.host
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let result = RemotePi.listDirectories(host: host, path: path)
+            DispatchQueue.main.async {
+                guard let self, token == self.loadToken else { return }
+                if !result.error.isEmpty {
+                    debugLog("remote browser: \(host.display):\(path) failed: \(result.error)")
+                    self.statusLabel.stringValue = result.error
+                    self.statusLabel.textColor = .systemRed
+                    return
+                }
+                debugLog("remote browser: \(host.display):\(result.path) dirs=\(result.dirs.count)")
+                self.currentPath = result.path
+                self.pathField.stringValue = result.path
+                self.directories = result.dirs.sorted {
+                    $0.localizedCaseInsensitiveCompare($1) == .orderedAscending
+                }
+                self.tableView.reloadData()
+                self.tableView.deselectAll(nil)
+                if self.directories.isEmpty {
+                    self.statusLabel.stringValue = "No subfolders — \u{201c}Open Folder\u{201d} uses this one"
+                } else {
+                    self.statusLabel.stringValue = "\(self.directories.count) folder(s)"
+                }
+                self.statusLabel.textColor = .secondaryLabelColor
+                self.panel.makeFirstResponder(self.pathField)
+            }
+        }
+    }
+
+    // MARK: - Actions
+
+    @objc private func openSelected() {
+        open(row: tableView.selectedRow)
+    }
+
+    private func open(row: Int) {
+        guard row >= 0 else { return }
+        if row == 0 {
+            goUp()
+        } else if directories.indices.contains(row - 1) {
+            debugLog("remote browser: entering \(directories[row - 1])")
+            load(currentPath + "/" + directories[row - 1])
+        }
+    }
+
+    @objc private func chooseCurrent() {
+        choose(currentPath)
+    }
+
+    private func choose(_ path: String) {
+        guard !path.isEmpty else { return }
+        finish()
+        onChoose?(path)
+    }
+
+    @objc private func cancel() {
+        finish()
+        onCancel?()
+    }
+
+    private func finish() {
+        guard !finished else { return }
+        finished = true
+        panel.sheetParent?.endSheet(panel)
+        panel.orderOut(nil)
+    }
+
+    // MARK: - Table
+
+    func numberOfRows(in tableView: NSTableView) -> Int {
+        directories.count + 1
+    }
+
+    func tableView(
+        _ tableView: NSTableView,
+        viewFor tableColumn: NSTableColumn?,
+        row: Int
+    ) -> NSView? {
+        let identifier = NSUserInterfaceItemIdentifier("cell")
+        let cell = tableView.makeView(withIdentifier: identifier, owner: self)
+            as? NSTextField
+            ?? {
+                let field = NSTextField(labelWithString: "")
+                field.identifier = identifier
+                field.font = NSFont.systemFont(ofSize: 12)
+                field.lineBreakMode = .byTruncatingMiddle
+                field.refusesFirstResponder = true
+                return field
+            }()
+        if row == 0 {
+            cell.stringValue = ".."
+            cell.textColor = .secondaryLabelColor
+        } else {
+            let name = directories[row - 1]
+            cell.stringValue = "\u{1f4c1} \(name)"
+            cell.textColor = .labelColor
+        }
+        return cell
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RPC session (self mode)
 // ---------------------------------------------------------------------------
 
 final class RpcSession {
     let directory: URL
+    /// Non-nil when pi runs on another machine and this session drives it
+    /// through `ssh -T host pi --mode rpc`.
+    let host: RemoteHost?
     private let process: Process
     private let stdinPipe = Pipe()
     private let stdoutPipe = Pipe()
@@ -1433,33 +2148,102 @@ final class RpcSession {
     private(set) var isStreaming = false
     private(set) var isRunning = false
 
+    var isRemote: Bool { host != nil }
     var processIdentifier: Int32 { process.processIdentifier }
+
+    /// Header label: the pid shown is ssh's on the Mac for remote tabs; the
+    /// remote pi pid is not visible to us and is not needed.
+    var processLabel: String {
+        isRemote ? "ssh \(processIdentifier)" : "pi \(processIdentifier)"
+    }
 
     var onEvent: (([String: Any]) -> Void)?
     var onExit: ((Int32) -> Void)?
 
-    static func launch(in directory: URL, sessionFile: String? = nil) throws -> RpcSession {
+    static func launch(
+        in directory: URL,
+        host: RemoteHost? = nil,
+        sessionFile: String? = nil
+    ) throws -> RpcSession {
+        if let host {
+            return try RpcSession(
+                directory: directory,
+                host: host,
+                piPath: nil,
+                sessionFile: sessionFile
+            )
+        }
         guard let pi = PiLauncher.resolvePiBinary() else {
             throw PiLaunchError.piNotFound
         }
-        return try RpcSession(directory: directory, piPath: pi, sessionFile: sessionFile)
+        return try RpcSession(
+            directory: directory,
+            host: nil,
+            piPath: pi,
+            sessionFile: sessionFile
+        )
     }
 
-    private init(directory: URL, piPath: String, sessionFile: String?) throws {
+    /// Remote bootstrap. Runs in the remote login shell so `pi` resolves with
+    /// the user's normal PATH; it never receives the local environment.
+    static func remoteLaunchScript(directory: URL, sessionFile: String?) -> String {
+        let quotedPath = PiLauncher.shellQuote(directory.path)
+        let failure = PiLauncher.shellQuote("pi-overlay: cannot cd to \(directory.path)")
+        var script = "target=\(quotedPath)\n"
+        script += RemotePi.homeExpansion(for: "target") + "\n"
+        script += "cd \"$target\" || { printf '%s\\n' \(failure) >&2; exit 9; }\n"
+        if let override = RemotePi.remotePiOverride {
+            script += "p=\(PiLauncher.shellQuote(override))\n"
+        } else {
+            script += "p=pi\n"
+            script += "if ! command -v pi >/dev/null 2>&1; then "
+                + "for c in \"$HOME/.local/bin/pi\" \"$HOME/.bun/bin/pi\" \"$HOME/n/bin/pi\" "
+                + "\"$HOME/node_modules/.bin/pi\" /opt/homebrew/bin/pi /usr/local/bin/pi; "
+                + "do [ -x \"$c\" ] && { p=\"$c\"; break; }; done; fi\n"
+            script += "if [ \"$p\" = pi ] && ! command -v pi >/dev/null 2>&1; then "
+                + "printf '%s\\n' 'pi-overlay: pi not found on the remote host "
+                + "(set PI_OVERLAY_REMOTE_PI to its path)' >&2; exit 127; fi\n"
+        }
+        script += "exec \"$p\" --mode rpc"
+        if let sessionFile {
+            script += " --session \(PiLauncher.shellQuote(sessionFile))"
+        }
+        return script
+    }
+
+    private init(
+        directory: URL,
+        host: RemoteHost?,
+        piPath: String?,
+        sessionFile: String?
+    ) throws {
         self.directory = directory
+        self.host = host
         self.parseQueue = DispatchQueue(label: "pi-overlay.rpc.\(UUID().uuidString)")
 
         process = Process()
-        process.executableURL = URL(fileURLWithPath: piPath)
-        var arguments = ["--mode", "rpc"]
-        if let sessionFile {
-            arguments.append(contentsOf: ["--session", sessionFile])
+        if let host {
+            process.executableURL = URL(fileURLWithPath: RemotePi.sshBinary)
+            let script = Self.remoteLaunchScript(directory: directory, sessionFile: sessionFile)
+            process.arguments = RemotePi.sshArguments(
+                host: host,
+                extra: [RemotePi.remoteCommand(script)]
+            )
+        } else {
+            process.executableURL = URL(fileURLWithPath: piPath ?? "")
+            var arguments = ["--mode", "rpc"]
+            if let sessionFile {
+                arguments.append(contentsOf: ["--session", sessionFile])
+            }
+            process.arguments = arguments
+            process.currentDirectoryURL = directory
         }
-        process.arguments = arguments
-        process.currentDirectoryURL = directory
         process.standardInput = stdinPipe
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
+        // The local env matters for a local pi (Finder-launched apps get a
+        // minimal PATH) and for the ssh client (HOME/SSH_AUTH_SOCK). A remote
+        // pi gets its environment from the remote login shell instead.
         process.environment = PiEnvironment.loginShell()
 
         process.terminationHandler = { [weak self] proc in
@@ -1499,7 +2283,11 @@ final class RpcSession {
             self?.appendStderr(text)
         }
 
-        debugLog("rpc launched dir=\(directory.path) pi=\(piPath)")
+        if let host {
+            debugLog("rpc launched dir=\(directory.path) host=\(host.display) ssh=\(RemotePi.sshBinary)")
+        } else {
+            debugLog("rpc launched dir=\(directory.path) pi=\(piPath ?? "")")
+        }
     }
 
     @discardableResult
@@ -1701,6 +2489,9 @@ private final class StatusTabRef: NSObject {
 final class RpcTab {
     let id = UUID()
     var directory: URL?
+    /// Set when this tab's pi runs on another machine over SSH. `directory`
+    /// then holds the absolute remote working directory.
+    var remoteHost: RemoteHost?
     var session: RpcSession?
     var isLaunching = false
     var status: KeyTapeView.AgentStatus = .idle
@@ -1719,6 +2510,25 @@ final class RpcTab {
     var selectedQueryID: String?
     var rawText = ""
     var tape: [String] = []
+
+    var isRemote: Bool { remoteHost != nil }
+
+    /// Identity used for dedupe, recents and profiles.conf.
+    var locationKey: String {
+        TabLocationCodec.encode(host: remoteHost, path: directory?.path ?? "")
+    }
+
+    /// Short label for the tab strip and status menu.
+    var displayName: String {
+        let base = directory?.lastPathComponent ?? "New Tab"
+        guard remoteHost != nil else { return base }
+        return "\u{2601} \(base)"
+    }
+
+    var fullLocation: String {
+        guard let remoteHost else { return directory?.path ?? "" }
+        return "\(remoteHost.display):\(directory?.path ?? "")"
+    }
 
     let webView: WKWebView
 
@@ -1793,16 +2603,18 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private var pendingSessions: Set<String> = []
     private var dialogQueue: [(tabID: UUID, request: [String: Any])] = []
     private var dialogVisible = false
+    /// Kept while the remote folder sheet is up.
+    private var remoteBrowser: RemoteFolderBrowser?
 
     private var isSelfMode: Bool { mode == .selfHost || mode == .selfTerminal }
 
     private func hasSession(for key: String) -> Bool {
         if mode == .selfHost {
-            if rpcTabs.contains(where: { $0.directory?.path == key && $0.session != nil }) {
+            if rpcTabs.contains(where: { $0.locationKey == key && $0.session != nil }) {
                 return true
             }
             return profileRuntime.values.contains { runtime in
-                runtime.tabs.contains { $0.directory?.path == key && $0.session != nil }
+                runtime.tabs.contains { $0.locationKey == key && $0.session != nil }
             }
         }
         return terminalSessions[key] != nil
@@ -2237,13 +3049,13 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 return
             }
             if tab.isLaunching {
-                statusLabel.stringValue = "STARTING PI"
+                statusLabel.stringValue = tab.isRemote ? "CONNECTING…" : "STARTING PI"
                 statusLabel.textColor = .systemOrange
             } else if tab.directory == nil {
                 statusLabel.stringValue = "SELECT PROJECT"
                 statusLabel.textColor = .systemOrange
             } else if tab.session == nil, tab.exitStatus != nil {
-                statusLabel.stringValue = "PI EXITED"
+                statusLabel.stringValue = tab.isRemote ? "SSH/PI EXITED" : "PI EXITED"
                 statusLabel.textColor = .systemRed
             } else if tab.session == nil {
                 statusLabel.stringValue = "NO PI SESSION"
@@ -2386,15 +3198,33 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         var restored: [(tab: RpcTab, active: Bool)] = []
 
         for entry in profile.tabs {
-            guard let url = directoryStore.normalize(entry.path) else {
-                debugLog("profiles.conf: skipping missing directory \(entry.path)")
-                missingTabPaths.append(entry.path)
-                continue
+            let location = TabLocationCodec.decode(entry.path)
+            let url: URL
+            if let host = location.host {
+                // Remote folders are not checked locally. Tabs are stored with
+                // the absolute path returned by the connect flow; skip a
+                // hand-edited `~` entry rather than mis-resolving it locally.
+                guard location.path.hasPrefix("/") else {
+                    debugLog("profiles.conf: skipping remote entry without absolute path \(entry.path)")
+                    missingTabPaths.append(entry.path)
+                    continue
+                }
+                url = URL(fileURLWithPath: location.path)
+                debugLog("profiles.conf: restoring remote \(host.display):\(location.path)")
+            } else {
+                guard let normalized = directoryStore.normalize(location.path) else {
+                    debugLog("profiles.conf: skipping missing directory \(entry.path)")
+                    missingTabPaths.append(entry.path)
+                    continue
+                }
+                url = normalized
             }
-            guard !seen.contains(url.path) else { continue }
-            seen.insert(url.path)
+            let key = TabLocationCodec.encode(host: location.host, path: url.path)
+            guard !seen.contains(key) else { continue }
+            seen.insert(key)
 
             let tab = makeBlankTab()
+            tab.remoteHost = location.host
             tab.directory = url
             tab.sessionFile = entry.session
             rpcTabs.append(tab)
@@ -2420,9 +3250,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         var tabs: [ProfileTab] = rpcTabs.compactMap { tab in
-            guard let directory = tab.directory else { return nil }
+            guard tab.directory != nil else { return nil }
             return ProfileTab(
-                path: directory.path,
+                path: tab.locationKey,
                 active: tab.id == activeRpcTabID,
                 session: tab.sessionFile
             )
@@ -2871,13 +3701,15 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         for tab in tabs {
             let item = NSMenuItem(
-                title: tab.directory?.lastPathComponent ?? "New Tab",
+                title: tab.displayName,
                 action: #selector(statusTabSelected(_:)),
                 keyEquivalent: ""
             )
             item.target = self
             item.representedObject = StatusTabRef(profile: profile, tabID: tab.id)
             item.attributedTitle = tabStatusTitle(tab)
+            item.toolTip = tab.remoteHost.map { "\($0.display):\(tab.directory?.path ?? "")" }
+                ?? tab.directory?.path
             menu.addItem(item)
         }
         return menu
@@ -2885,7 +3717,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     private func tabStatusTitle(_ tab: RpcTab) -> NSAttributedString {
         let (mark, color) = statusMark(for: tab)
-        let name = tab.directory?.lastPathComponent ?? "New Tab"
+        let name = tab.displayName
         let title = NSMutableAttributedString()
         if !mark.isEmpty {
             title.append(NSAttributedString(
@@ -2950,18 +3782,24 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     private func rebuildDirectoryMenu() {
+        let selectedTab = mode == .selfHost ? activeRpcTab : nil
         let selectedDirectory: URL? = mode == .selfHost
-            ? activeRpcTab?.directory
+            ? selectedTab?.directory
             : activeDirectory
+        let remoteRecents = mode == .selfHost ? directoryStore.remoteRecents() : []
         let menu = NSMenu()
 
         // For a pull-down button the first item supplies the button title.
+        let titleBase = selectedDirectory?.lastPathComponent ?? "Select project…"
+        let title = selectedTab?.remoteHost != nil ? "☁ \(titleBase)" : titleBase
         let header = NSMenuItem(
-            title: "📁 \(selectedDirectory?.lastPathComponent ?? "Select project…")",
+            title: "📁 \(title)",
             action: nil,
             keyEquivalent: ""
         )
-        header.toolTip = selectedDirectory?.path ?? "Choose a project directory"
+        header.toolTip = selectedTab?.remoteHost.map { "\($0.display):\(selectedDirectory?.path ?? "")" }
+            ?? selectedDirectory?.path
+            ?? "Choose a project directory"
         menu.addItem(header)
 
         for url in directoryStore.recents {
@@ -2972,7 +3810,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             )
             item.target = self
             item.representedObject = url.path
-            item.state = url.path == selectedDirectory?.path ? .on : .off
+            item.state = selectedTab?.remoteHost == nil && url.path == selectedDirectory?.path
+                ? .on
+                : .off
             if hasSession(for: url.path) {
                 item.toolTip = "pi session open"
             }
@@ -2980,6 +3820,29 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         if !directoryStore.recents.isEmpty {
+            menu.addItem(.separator())
+        }
+
+        if !remoteRecents.isEmpty {
+            let remoteHeader = NSMenuItem(title: "Remote", action: nil, keyEquivalent: "")
+            remoteHeader.isEnabled = false
+            menu.addItem(remoteHeader)
+
+            for remote in remoteRecents {
+                let key = TabLocationCodec.encode(host: remote.host, path: remote.path)
+                let item = NSMenuItem(
+                    title: "☁ \(remote.host.display):\(remote.path)",
+                    action: #selector(remoteDirectoryMenuItemSelected(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = key
+                item.state = key == selectedTab?.locationKey ? .on : .off
+                item.toolTip = hasSession(for: key)
+                    ? "pi session open on \(remote.host.display)"
+                    : "\(remote.host.display):\(remote.path)"
+                menu.addItem(item)
+            }
             menu.addItem(.separator())
         }
 
@@ -2991,7 +3854,18 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         choose.target = self
         menu.addItem(choose)
 
-        if selectedDirectory != nil {
+        if mode == .selfHost {
+            let connect = NSMenuItem(
+                title: "Connect to Remote Host…",
+                action: #selector(connectToRemoteHost),
+                keyEquivalent: ""
+            )
+            connect.target = self
+            connect.toolTip = "Run pi --mode rpc on another machine over SSH"
+            menu.addItem(connect)
+        }
+
+        if selectedDirectory != nil, selectedTab?.remoteHost == nil {
             let reveal = NSMenuItem(
                 title: "Reveal in Finder",
                 action: #selector(revealActiveDirectory),
@@ -3031,13 +3905,106 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         directoryPopup.menu = menu
-        directoryPopup.title = "📁 \(selectedDirectory?.lastPathComponent ?? "Select project…")"
-        directoryPopup.toolTip = selectedDirectory?.path ?? "Choose a project directory"
+        directoryPopup.title = "📁 \(title)"
+        directoryPopup.toolTip = header.toolTip
     }
 
     @objc private func directoryMenuItemSelected(_ sender: NSMenuItem) {
         guard let path = sender.representedObject as? String else { return }
         switchSession(to: URL(fileURLWithPath: path))
+    }
+
+    @objc private func remoteDirectoryMenuItemSelected(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String else { return }
+        let location = TabLocationCodec.decode(raw)
+        guard let host = location.host, !location.path.isEmpty else { return }
+        switchRemoteSession(host: host, path: location.path)
+    }
+
+    /// Asks for an SSH destination and a remote directory, validates them with
+    /// one round trip, then opens (or focuses) a tab for that location.
+    /// Step 1: ask for the SSH destination and prove it works. Step 2: browse
+    /// the remote folders (the path field in the sheet still accepts any path).
+    @objc func connectToRemoteHost() {
+        guard mode == .selfHost else { return }
+        if isMinimized { toggleMinimize() }
+
+        let alert = NSAlert()
+        alert.messageText = "Connect to a remote pi"
+        alert.informativeText =
+            "Runs `pi --mode rpc` on another machine over SSH. Your ~/.ssh/config, "
+            + "keys and agent are used; no passwords are stored in the overlay."
+        alert.addButton(withTitle: "Connect")
+        alert.addButton(withTitle: "Cancel")
+
+        let last = directoryStore.lastRemote
+        let accessory = NSView(frame: NSRect(x: 0, y: 0, width: 380, height: 76))
+        let hostLabel = NSTextField(labelWithString: "Host")
+        hostLabel.frame = NSRect(x: 0, y: 54, width: 380, height: 16)
+        hostLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let hostField = NSTextField(frame: NSRect(x: 0, y: 26, width: 380, height: 24))
+        hostField.stringValue = last?.host.display ?? ""
+        hostField.placeholderString = "user@host or ~/.ssh alias (e.g. 192.168.1.21)"
+        accessory.addSubview(hostLabel)
+        accessory.addSubview(hostField)
+        alert.accessoryView = accessory
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self else { return }
+            guard response == .alertFirstButtonReturn else {
+                self.focusOverlay()
+                return
+            }
+
+            let rawHost = hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let host = RemoteHost.parse(rawHost) else {
+                self.showAlert(title: "Invalid host", message: "Use `host`, `user@host` or `host:port`.")
+                return
+            }
+
+            self.statusLabel.stringValue = "CONNECTING TO \(host.display.uppercased())…"
+            self.statusLabel.textColor = .systemOrange
+
+            DispatchQueue.global(qos: .userInitiated).async {
+                // Resolve the remote home and check that ssh + pi work before
+                // opening the browser sheet. `~` is expanded on the remote.
+                let prepared = RemotePi.prepare(host: host, path: "~")
+                DispatchQueue.main.async {
+                    if prepared.error.isEmpty {
+                        let lastPath = self.directoryStore.lastRemote.flatMap {
+                            $0.host == host ? $0.path : nil
+                        }
+                        self.statusLabel.stringValue = "CHOOSE A REMOTE FOLDER"
+                        self.statusLabel.textColor = .systemOrange
+                        self.presentRemoteBrowser(host: host, startPath: lastPath ?? "~")
+                    } else {
+                        self.statusLabel.stringValue = "SSH FAILED"
+                        self.statusLabel.textColor = .systemRed
+                        self.showAlert(
+                            title: "Could not connect to \(host.display)",
+                            message: prepared.error
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func presentRemoteBrowser(host: RemoteHost, startPath: String) {
+        let browser = RemoteFolderBrowser(host: host, startPath: startPath)
+        browser.onChoose = { [weak self] path in
+            guard let self else { return }
+            self.remoteBrowser = nil
+            self.directoryStore.addRemoteRecent(host: host, path: path)
+            self.switchRemoteSession(host: host, path: path)
+        }
+        browser.onCancel = { [weak self] in
+            self?.remoteBrowser = nil
+            self?.focusOverlay()
+            self?.showIdleStatus()
+        }
+        remoteBrowser = browser
+        browser.begin(for: window)
     }
 
     @objc func chooseDirectory() {
@@ -3050,8 +4017,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         panel.canCreateDirectories = true
         panel.prompt = "Open pi here"
         panel.message = "Choose the working directory for a new pi session."
-        panel.directoryURL = (mode == .selfHost ? activeRpcTab?.directory : nil)
-            ?? activeDirectory
+        let activeLocal = activeRpcTab?.remoteHost == nil ? activeRpcTab?.directory : nil
+        panel.directoryURL = activeLocal ?? directoryStore.lastDirectory
+            ?? URL(fileURLWithPath: NSHomeDirectory())
         NSApp.activate(ignoringOtherApps: true)
 
         panel.beginSheetModal(for: window) { [weak self] response in
@@ -3064,6 +4032,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     @objc private func revealActiveDirectory() {
+        guard activeRpcTab?.remoteHost == nil else { return }
         NSWorkspace.shared.activateFileViewerSelecting([activeDirectory])
     }
 
@@ -3120,7 +4089,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         let models = tab.models ?? []
         let current = tab.currentModel
-        let key = tab.directory?.path ?? "blank"
+        let key = tab.locationKey
 
         modelPopup.removeAllItems()
 
@@ -3183,7 +4152,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     /// Marker shown before the tab name plus the color it should be drawn in.
     private func tabTitleParts(_ tab: RpcTab) -> (marker: String, name: String, color: NSColor?) {
-        let name = tab.directory?.lastPathComponent ?? "New Tab"
+        let name = tab.displayName
         if tab.isLaunching {
             return ("…", name, nil)
         }
@@ -3237,7 +4206,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 ? NSColor.white
                 : NSColor(white: 0.84, alpha: 1)).cgColor
             button.alignment = .center
-            button.toolTip = tab.directory?.path ?? "No project selected"
+            button.toolTip = tab.fullLocation.isEmpty ? "No project selected" : tab.fullLocation
             button.frame = NSRect(x: x, y: 1, width: width, height: 26)
             let titleColor = tab.id == activeRpcTabID
                 ? NSColor.labelColor
@@ -3304,7 +4273,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private func refreshSessionRow() {
         guard mode == .selfHost else { return }
 
-        guard let directory = activeRpcTab?.directory else {
+        guard let tab = activeRpcTab, let directory = tab.directory else {
             sessionInfos = []
             rebuildSessionMenu()
             return
@@ -3312,8 +4281,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         sessionLoadToken += 1
         let token = sessionLoadToken
+        let host = tab.remoteHost
         DispatchQueue.global(qos: .utility).async {
-            let infos = PiSessionStore.list(for: directory)
+            let infos: [PiSessionInfo]
+            if let host {
+                // Remote listing does one ssh round trip; keep it off the main
+                // thread like the on-disk scan.
+                infos = RemotePiSessionStore.list(host: host, path: directory.path)
+            } else {
+                infos = PiSessionStore.list(for: directory)
+            }
             DispatchQueue.main.async { [weak self] in
                 guard let self, token == self.sessionLoadToken else { return }
                 self.sessionInfos = infos
@@ -3373,7 +4350,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         newSessionButton.isEnabled = running
 
         debugLog(
-            "session menu key=\(activeRpcTab?.directory?.path ?? "blank") "
+            "session menu key=\(activeRpcTab?.locationKey ?? "blank") "
                 + "count=\(sessionInfos.count) "
                 + "current=\((currentFile as NSString?)?.lastPathComponent ?? "none")"
         )
@@ -3646,16 +4623,25 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         terminalInjector = nil
 
         let directory = tab.directory
-        directoryPopup.title = directory.map { "📁 \($0.lastPathComponent)" }
-            ?? "📁 Select project…"
-        directoryPopup.toolTip = directory?.path ?? "Choose a project directory"
-        window.title = "pi rpc · \(directory?.lastPathComponent ?? "New Tab")"
+        let locationName: String = {
+            guard let remote = tab.remoteHost else { return directory?.lastPathComponent ?? "New Tab" }
+            return "\(remote.display):\(directory?.lastPathComponent ?? "")"
+        }()
+        directoryPopup.title = tab.remoteHost == nil
+            ? (directory.map { "📁 \($0.lastPathComponent)" } ?? "📁 Select project…")
+            : "☁ \(directory?.lastPathComponent ?? "Select project…")"
+        directoryPopup.toolTip = tab.remoteHost.map { "\($0.display):\(directory?.path ?? "")" }
+            ?? directory?.path
+            ?? "Choose a project directory"
+        window.title = "pi rpc · \(locationName)"
 
         if let session = tab.session {
-            pidLabel.stringValue = "pi \(session.processIdentifier)"
-            pidLabel.toolTip = "pi RPC child process ID \(session.processIdentifier)"
+            pidLabel.stringValue = session.processLabel
+            pidLabel.toolTip = session.isRemote
+                ? "ssh client PID \(session.processIdentifier) → \(tab.remoteHost?.display ?? "")"
+                : "pi RPC child process ID \(session.processIdentifier)"
         } else if tab.exitStatus != nil {
-            pidLabel.stringValue = "pi —"
+            pidLabel.stringValue = tab.isRemote ? "ssh —" : "pi —"
             pidLabel.toolTip = nil
         } else {
             pidLabel.stringValue = ""
@@ -3666,13 +4652,13 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         refreshSessionRow()
 
         if tab.isLaunching {
-            statusLabel.stringValue = "STARTING PI"
+            statusLabel.stringValue = tab.isRemote ? "CONNECTING…" : "STARTING PI"
             statusLabel.textColor = .systemOrange
         } else if tab.directory == nil {
             statusLabel.stringValue = "SELECT PROJECT"
             statusLabel.textColor = .systemOrange
         } else if tab.session == nil, tab.exitStatus != nil {
-            statusLabel.stringValue = "PI EXITED"
+            statusLabel.stringValue = tab.isRemote ? "SSH/PI EXITED" : "PI EXITED"
             statusLabel.textColor = .systemRed
         } else if tab.session == nil {
             statusLabel.stringValue = "NO PI SESSION"
@@ -3698,7 +4684,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         focusOverlay()
 
-        debugLog("rpc tab active dir=\(directory?.path ?? "blank")")
+        debugLog("rpc tab active dir=\(directory?.path ?? "blank") host=\(tab.remoteHost?.display ?? "local")")
     }
 
     @objc func openNewTab() {
@@ -3757,13 +4743,29 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     ) {
         tab.session?.stop()
 
-        // Resume the session pinned to this tab (restored from tabs.conf) or,
-        // for a restored tab without one, the newest session for the project.
-        let pinned = tab.sessionFile.flatMap {
-            FileManager.default.fileExists(atPath: $0) ? $0 : nil
+        let host = tab.remoteHost
+
+        // Resume the session pinned to this tab (profiles.conf) or, for a
+        // restored local tab without one, the newest session for the project.
+        // Remote sessions are only resumed when pinned: the remote store is a
+        // network round trip, so a fresh tab starts a new conversation and the
+        // Sessions row lists the rest.
+        let pinned: String?
+        if host != nil {
+            pinned = tab.sessionFile
+        } else {
+            pinned = tab.sessionFile.flatMap {
+                FileManager.default.fileExists(atPath: $0) ? $0 : nil
+            }
         }
-        let resumePath = pinned
-            ?? (resumeLatest ? PiSessionStore.list(for: directory, limit: 1).first?.path : nil)
+        let resumePath: String?
+        if let pinned {
+            resumePath = pinned
+        } else if resumeLatest, host == nil {
+            resumePath = PiSessionStore.list(for: directory, limit: 1).first?.path
+        } else {
+            resumePath = nil
+        }
 
         tab.session = nil
         tab.directory = directory
@@ -3781,7 +4783,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         tab.queries = []
         tab.selectedQueryID = nil
         activeDirectory = directory
-        directoryStore.addRecent(directory)
+        if host == nil {
+            directoryStore.addRecent(directory)
+        }
         rebuildTabBar()
 
         if activeRpcTabID == tab.id {
@@ -3793,17 +4797,21 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             sessionQueries = []
             selectedQueryID = nil
             rebuildQueryMenu()
-            statusLabel.stringValue = "STARTING PI"
+            statusLabel.stringValue = host == nil ? "STARTING PI" : "CONNECTING…"
             statusLabel.textColor = .systemOrange
         }
 
         debugLog(
-            "rpc start dir=\(directory.path) session="
+            "rpc start \(host.map { "host=\($0.display) " } ?? "")dir=\(directory.path) session="
                 + "\((resumePath as NSString?)?.lastPathComponent ?? "new")"
         )
 
         do {
-            let session = try RpcSession.launch(in: directory, sessionFile: resumePath)
+            let session = try RpcSession.launch(
+                in: directory,
+                host: host,
+                sessionFile: resumePath
+            )
             let tabID = tab.id
             session.onEvent = { [weak self, weak session] record in
                 guard let session else { return }
@@ -3841,19 +4849,42 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
     }
 
-    private func switchSession(to url: URL) {
-        guard let normalized = directoryStore.normalize(url.path) else {
-            statusLabel.stringValue = "DIR MISSING"
+    private func switchRemoteSession(host: RemoteHost, path: String) {
+        guard mode == .selfHost else { return }
+        guard path.hasPrefix("/"),
+              !path.contains("\n"),
+              !path.contains("\r") else {
+            statusLabel.stringValue = "REMOTE PATH MUST BE ABSOLUTE"
             statusLabel.textColor = .systemRed
             return
         }
+        switchSession(to: URL(fileURLWithPath: path), remoteHost: host)
+    }
 
-        let key = normalized.path
-        directoryStore.addRecent(normalized)
+    private func switchSession(to url: URL, remoteHost: RemoteHost? = nil) {
+        if remoteHost != nil, mode != .selfHost { return }
+
+        let normalized: URL
+        let key: String
+        if let remoteHost {
+            guard !url.path.isEmpty else { return }
+            normalized = url
+            key = TabLocationCodec.encode(host: remoteHost, path: normalized.path)
+            directoryStore.addRemoteRecent(host: remoteHost, path: normalized.path)
+        } else {
+            guard let local = directoryStore.normalize(url.path) else {
+                statusLabel.stringValue = "DIR MISSING"
+                statusLabel.textColor = .systemRed
+                return
+            }
+            normalized = local
+            key = local.path
+            directoryStore.addRecent(local)
+        }
 
         switch mode {
         case .selfHost:
-            if let existing = rpcTabs.first(where: { $0.directory?.path == key }) {
+            if let existing = rpcTabs.first(where: { $0.locationKey == key }) {
                 if let blank = activeRpcTab,
                    blank.directory == nil,
                    blank.session == nil,
@@ -3878,6 +4909,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 rpcTabs.append(tab)
             }
 
+            tab.remoteHost = remoteHost
             activateRpcTab(tab)
             startRpcSession(in: tab, directory: normalized)
 
@@ -4078,6 +5110,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         if tab.sessionFile != file {
                             tab.sessionFile = file
                             saveOpenTabs()
+                            // A fresh remote session file appears after the RPC
+                            // child starts; rescan so it is in the Sessions row
+                            // too, not only in the "current" label.
+                            if isActive { refreshSessionRow() }
                         }
                     } else {
                         tab.sessionFile = nil
@@ -4303,9 +5339,13 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         if tab.id == activeRpcTabID {
             keyTape.agentStatus = .idle
             keyTape.needsDisplay = true
-            statusLabel.stringValue = "PI EXITED (\(status))"
+            if tab.isRemote {
+                statusLabel.stringValue = "SSH/PI EXITED (\(status))"
+            } else {
+                statusLabel.stringValue = "PI EXITED (\(status))"
+            }
             statusLabel.textColor = .systemRed
-            pidLabel.stringValue = "pi —"
+            pidLabel.stringValue = tab.isRemote ? "ssh —" : "pi —"
             pidLabel.toolTip = nil
             modelPopup.isEnabled = false
             modelPopup.toolTip = "pi exited"
@@ -4315,7 +5355,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 if !detail.isEmpty {
                     showAlert(
-                        title: "pi exited (\(status))",
+                        title: tab.remoteHost.map { "\($0.display): pi exited (\(status))" }
+                            ?? "pi exited (\(status))",
                         message: String(detail.suffix(1500))
                     )
                 }
@@ -4375,7 +5416,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         if let message = request["message"] as? String, !message.isEmpty {
             infoParts.append(message)
         }
-        infoParts.append("Session: \(tab.directory.map { displayPath($0) } ?? "New Tab")")
+        infoParts.append(
+            "Session: "
+                + (tab.remoteHost.map { "\($0.display):\(tab.directory?.path ?? "")" }
+                    ?? tab.directory.map { displayPath($0) }
+                    ?? "New Tab")
+        )
         alert.informativeText = infoParts.joined(separator: "\n\n")
         alert.alertStyle = .informational
 
@@ -4881,7 +5927,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private func notifyTurnFinished(profile: String?, tab: RpcTab?) {
         guard !window.isVisible else { return }
 
-        let tabName = tab?.directory?.lastPathComponent ?? activeDirectory.lastPathComponent
+        let tabName = tab?.displayName ?? activeDirectory.lastPathComponent
         postNotification(
             title: tabName,
             body: "Update is available under the tab",

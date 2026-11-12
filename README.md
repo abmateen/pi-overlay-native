@@ -86,6 +86,7 @@ Sessions  [fix markdown tables · Oct 24             ▾]  ＋
 | **Cmd + 1…9** | Jump to the 1st…9th tab |
 | **Model dropdown** | Switch the active tab's model without restarting pi |
 | **Sessions dropdown** | Resume a saved session from this folder in the active tab |
+| **Connect to Remote Host…** | Folder dropdown → run `pi --mode rpc` on another machine over SSH (see [Remote sessions](#remote-sessions-ssh)) |
 | **＋ next to Sessions** | Start a new conversation in the active tab (like `/new`) |
 | **Prompt history dropdown** | Show the answer for a previous user prompt, or **Latest answer** |
 | **Profile dropdown** | Switch, create, rename, or delete profiles; each profile owns its tab set |
@@ -153,6 +154,7 @@ On-device recognition is used when the installed speech recognizer supports it.
 - Xcode Command Line Tools (`swiftc`)
 - `pi` installed
 - A terminal session running `pi` (`tty` mode) or Terminal.app (`self-tui` mode)
+- Key-based SSH access to any remote host you want to use in a remote tab
 
 ## Build
 
@@ -299,7 +301,83 @@ overlay.
   from `.zprofile`/`.zshrc` and Homebrew's `PATH` work even when the overlay is
   launched from Finder.
 - Each tab is a separate `pi --mode rpc` process; memory and provider usage
-  scale with the number of open tabs.
+  scale with the number of open tabs. A remote tab's child is `ssh`, which
+  carries the same JSONL protocol to a `pi --mode rpc` on the other machine.
+
+### Remote sessions (SSH)
+
+A tab can drive pi on another machine instead of this Mac. pi's RPC protocol has
+no socket, so the overlay runs
+
+```text
+ssh -T -o BatchMode=yes host -- sh -lc 'exec pi --mode rpc …'
+```
+
+as the tab's child. Its stdin/stdout are the remote pi's stdin/stdout, which is
+exactly what a local tab already talks to. Everything about the session — pi's
+configuration, `auth.json`, project `.pi` files, shell tools, working directory
+and session store — stays on the remote machine.
+
+Open one from the folder dropdown → **Connect to Remote Host…**. This is two
+steps:
+
+1. Enter a `~/.ssh/config` alias or `user@host` (optional `:port`) and press
+   **Connect**. The overlay runs one SSH round trip (`pwd -P` + `command -v pi`)
+   and reports auth/host-key/PATH problems before anything else happens.
+2. A **folder browser** opens at the remote home (or the last folder used on
+   that host). Double-click a folder or use **Enter** to go in, **↑ Up** to go
+   back, and **Open Folder** to use the current directory. The path field at the
+   top is always editable, so you can paste an absolute path or `~/…` directly
+   (the `~` is expanded on the remote side, not on the Mac).
+
+Remote folders are remembered in the dropdown with a ☁ and saved in
+`profiles.conf` as
+
+```text
+ssh://user@host:2222/absolute/path	/absolute/path/to/session.jsonl
+```
+
+Tabs show `☁ name` in the tab strip, the window title includes `host:path`, and
+the header PID is the local `ssh` client (the remote pi PID is not visible from
+the Mac). The Sessions row is read from the remote
+`~/.pi/agent/sessions/--<encoded-cwd>--/*.jsonl` store over a single batched SSH
+call; the model dropdown, streaming status, Markdown response, prompt history,
+session switching, `/new`, dialogs and abort all work unchanged.
+
+Environment and credentials:
+
+- The remote pi inherits the **remote** login shell's environment
+  (`sh -lc`, or the executable in `PI_OVERLAY_REMOTE_SHELL`, e.g. `zsh`). It never
+  receives the Mac's environment or provider keys.
+- Credentials come from the remote `~/.pi/agent/auth.json` (run `/login` there)
+  or from variables exported in the remote login profile (prefer `.zshenv` /
+  `.zprofile`, which login shells read).
+- SSH runs with `-T` (no pty, so stdout stays raw JSONL) and `BatchMode=yes` (no
+  password prompts; a GUI app has no terminal). Accept a host key once in
+  Terminal (`ssh host`) before using it here.
+- SSH agent forwarding is **not** enabled. If the remote needs git-over-ssh,
+  give it its own key rather than exposing the Mac's agent.
+
+Tuning:
+
+| Variable | Effect |
+|---|---|
+| `PI_OVERLAY_SSH` | ssh executable (default `/usr/bin/ssh`) |
+| `PI_OVERLAY_REMOTE_SHELL` | remote shell used to load the login environment (default `sh`) |
+| `PI_OVERLAY_REMOTE_PI` | absolute path to `pi` on the remote (skips the PATH lookup) |
+| `PI_OVERLAY_SSH_CONTROL=0` | disable SSH connection sharing (`ControlMaster`) |
+
+Remote limitations:
+
+- The overlay cannot attach to a `pi --mode rpc` that is already running in a
+  remote terminal. It starts its own remote RPC process and resumes the same
+  session file; two front-ends on one session file behave like two local tabs.
+- A dropped SSH connection ends that tab's remote pi (stdin EOF). Open the
+  location again and pick the session in the Sessions row to continue.
+- Remote entries in `profiles.conf` must use absolute paths; the connect sheet
+  writes them that way. A hand-edited `~/…` remote path is kept but not started.
+- The remote `pi` must be startable without prompts and already configured for
+  its models and credentials.
 
 ### Saved sessions row
 
@@ -321,7 +399,8 @@ tab's directory:
 - Switching is refused while a turn is running (`BUSY — CANNOT SWITCH`); abort
   with **Esc** first.
 - The list is rescanned when you switch tabs, when a turn settles, and after a
-  session switch.
+  session switch. For remote tabs the same list is read from the remote host
+  over SSH (see [Remote sessions](#remote-sessions-ssh)).
 
 ### Profiles and remembered tabs
 
@@ -356,8 +435,12 @@ active = daily
 - `*` marks the tab that was active; it is restored as the active tab.
 - The optional tab-separated session file is the conversation the tab was last
   viewing (updated when you pick one in the Sessions row and when pi reports the
-  active file). Without it, the newest session for the directory is resumed.
+  active file). Without it, the newest session for the directory is resumed
+  (local tabs; remote tabs start a new conversation unless pinned).
 - Paths may use `~`. Blank lines and `#` comments are ignored.
+- Remote tabs are written as `ssh://[user@]host[:port]/absolute/path` (for
+  example `* ssh://me@192.168.1.21/srv/app`); the session column is the absolute
+  path on that host. Plain paths are local tabs.
 - The file is rewritten whenever a profile's tab set or active tab changes.
 - Directories that do not exist right now (unmounted volume, deleted project)
   are skipped at launch but kept in the profile so they come back.
