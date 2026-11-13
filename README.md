@@ -134,6 +134,23 @@ move it.
 The overlay receives keys only while it has focus; there is no separate capture
 toggle. It is not a global keylogger.
 
+### Slash commands
+
+Typing `/` opens a small floating command list above the prompt card. For now
+it contains only the discoverable **skills** and the **MCP** command:
+
+- `/skill` or `/skill:` lists the available `skill:name` commands; keep typing
+  to filter.
+- `/mcp` runs pi's MCP command. Its status notifications are collected briefly
+  and shown in a small **MCP** sheet (RPC mode prints status instead of
+  opening the TUI manager).
+- Up/Down moves the selection, Tab or Return accepts, Esc closes the list.
+  Selecting a skill inserts `/skill:name ` so arguments can be added; an
+  exactly typed command runs immediately.
+- The list is fetched from pi with `get_commands`, so it matches the extensions,
+  prompt templates and skills loaded in the session. Other command types and
+  built-in TUI commands are intentionally not listed yet.
+
 While minimized, only the top bar is clickable: text keys are ignored, but tab
 switching, **＋**, **⌄/⌃**, Ctrl+T/Ctrl+W, Ctrl+N and Cmd+M still work.
 

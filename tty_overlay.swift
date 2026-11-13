@@ -428,6 +428,237 @@ final class PillButton: NSButton {
     }
 }
 
+/// One discoverable pi command (`get_commands`). Only skills and the MCP
+/// command are kept for now.
+struct PiCommand: Equatable {
+    let name: String
+    let description: String
+    let source: String
+    let sourceInfo: String?
+
+    init?(json: [String: Any]) {
+        guard let name = json["name"] as? String, !name.isEmpty else { return nil }
+        self.name = name
+        self.description = (json["description"] as? String ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.source = json["source"] as? String ?? ""
+        if let info = json["sourceInfo"] as? [String: Any] {
+            var parts: [String] = []
+            if let scope = info["scope"] as? String, !scope.isEmpty { parts.append(scope) }
+            if let path = info["path"] as? String, !path.isEmpty { parts.append(path) }
+            self.sourceInfo = parts.isEmpty ? nil : parts.joined(separator: " · ")
+        } else {
+            self.sourceInfo = nil
+        }
+    }
+}
+
+/// One row in the slash-command palette.
+final class CommandRowView: NSView {
+    override var isFlipped: Bool { true }
+
+    let command: PiCommand
+    var isSelected = false {
+        didSet { if isSelected != oldValue { needsDisplay = true } }
+    }
+    var onAccept: ((PiCommand) -> Void)?
+
+    init(command: PiCommand) {
+        self.command = command
+        super.init(frame: .zero)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        onAccept?(command)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isSelected {
+            Theme.accentSoft.setFill()
+            Theme.rounded(bounds.insetBy(dx: 2, dy: 1), 8).fill()
+        }
+
+        let badgeFont = Theme.font(9, .semibold)
+        let badgeText = command.name == "mcp" ? "mcp" : command.source
+        let badgeAttrs: [NSAttributedString.Key: Any] = [
+            .font: badgeFont,
+            .foregroundColor: Theme.textSecondary,
+        ]
+        let badgeSize = (badgeText as NSString).size(withAttributes: badgeAttrs)
+        let badgeWidth = badgeSize.width + 12
+        let badgeRect = NSRect(
+            x: bounds.width - badgeWidth - 10,
+            y: (bounds.height - 16) / 2,
+            width: badgeWidth,
+            height: 16
+        )
+        Theme.fieldAlt.setFill()
+        Theme.rounded(badgeRect, 8).fill()
+        (badgeText as NSString).draw(
+            at: NSPoint(x: badgeRect.minX + 6, y: badgeRect.minY + 3),
+            withAttributes: badgeAttrs
+        )
+
+        let nameFont = Theme.mono(12, .medium)
+        let nameParagraph = NSMutableParagraphStyle()
+        nameParagraph.lineBreakMode = .byTruncatingMiddle
+        let nameAttrs: [NSAttributedString.Key: Any] = [
+            .font: nameFont,
+            .foregroundColor: Theme.text,
+            .paragraphStyle: nameParagraph,
+        ]
+        (("/" + command.name) as NSString).draw(
+            in: NSRect(
+                x: 12,
+                y: 6,
+                width: max(20, badgeRect.minX - 20),
+                height: 16
+            ),
+            withAttributes: nameAttrs
+        )
+
+        if !command.description.isEmpty {
+            let descParagraph = NSMutableParagraphStyle()
+            descParagraph.lineBreakMode = .byTruncatingTail
+            let descAttrs: [NSAttributedString.Key: Any] = [
+                .font: Theme.font(10.5, .regular),
+                .foregroundColor: Theme.textSecondary,
+                .paragraphStyle: descParagraph,
+            ]
+            (command.description as NSString).draw(
+                in: NSRect(
+                    x: 12,
+                    y: 21,
+                    width: max(20, badgeRect.minX - 20),
+                    height: 14
+                ),
+                withAttributes: descAttrs
+            )
+        }
+    }
+}
+
+/// Floating list of slash commands. Rows are created from `PiCommand`s and
+/// kept in a scroll view so a long skill list still works.
+final class CommandPaletteView: NSView {
+    private let scrollView = NSScrollView()
+    private let document = CommandPaletteDocumentView()
+    private var rows: [CommandRowView] = []
+    private(set) var commands: [PiCommand] = []
+    private(set) var selectedIndex = 0
+    var onAccept: ((PiCommand) -> Void)?
+
+    override var isFlipped: Bool { true }
+
+    var preferredHeight: CGFloat {
+        min(320, CGFloat(max(1, commands.count)) * 38 + 12)
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        scrollView.verticalScrollElasticity = .none
+        scrollView.documentView = document
+        addSubview(scrollView)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override func draw(_ dirtyRect: NSRect) {
+        Theme.card.setFill()
+        Theme.rounded(bounds, 12).fill()
+        Theme.border.setStroke()
+        let border = Theme.rounded(bounds.insetBy(dx: 0.5, dy: 0.5), 12)
+        border.lineWidth = 1
+        border.stroke()
+    }
+
+    override func layout() {
+        super.layout()
+        scrollView.frame = bounds.insetBy(dx: 6, dy: 6)
+        let width = max(10, scrollView.contentSize.width)
+        let height = max(scrollView.contentSize.height, CGFloat(rows.count) * 38)
+        document.frame = NSRect(x: 0, y: 0, width: width, height: height)
+        for (index, row) in rows.enumerated() {
+            row.frame = NSRect(x: 0, y: CGFloat(index) * 38, width: width, height: 38)
+        }
+    }
+
+    func setCommands(_ commands: [PiCommand]) {
+        self.commands = commands
+        for row in rows { row.removeFromSuperview() }
+        rows = commands.map { command in
+            let row = CommandRowView(command: command)
+            row.onAccept = { [weak self] selected in
+                self?.onAccept?(selected)
+            }
+            document.addSubview(row)
+            return row
+        }
+        selectedIndex = 0
+        updateSelection()
+        needsLayout = true
+    }
+
+    func moveSelection(_ delta: Int) {
+        guard !rows.isEmpty else { return }
+        selectedIndex = (selectedIndex + delta + rows.count) % rows.count
+        updateSelection()
+    }
+
+    func selectedCommand() -> PiCommand? {
+        guard rows.indices.contains(selectedIndex) else { return nil }
+        return rows[selectedIndex].command
+    }
+
+    private func updateSelection() {
+        for (index, row) in rows.enumerated() {
+            row.isSelected = index == selectedIndex
+        }
+        guard rows.indices.contains(selectedIndex) else { return }
+        rows[selectedIndex].scrollToVisible(rows[selectedIndex].bounds)
+    }
+}
+
+/// Flipped document view for top-down command rows.
+final class CommandPaletteDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
+/// Non-activating floating panel so the command list can extend above the
+/// overlay window without stealing focus from the prompt text view.
+final class CommandPalettePanel: NSPanel {
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    init() {
+        super.init(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 200),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        level = .floating
+        isOpaque = false
+        backgroundColor = .clear
+        hasShadow = true
+        hidesOnDeactivate = false
+        isMovable = false
+        isReleasedWhenClosed = false
+        animationBehavior = .none
+        collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+    }
+}
+
 enum Mode {
     case dry
     case tty
@@ -2793,6 +3024,12 @@ final class RpcSession {
         _ = send(["type": "get_available_models"])
     }
 
+    /// Discoverable commands (extension commands, prompt templates, skills).
+    /// The palette currently keeps only `skill:*` and `mcp`.
+    func requestCommands() {
+        _ = send(["type": "get_commands"])
+    }
+
     func setModel(provider: String, modelId: String) {
         _ = send([
             "type": "set_model",
@@ -2981,6 +3218,8 @@ final class RpcTab {
     var responseExpanded = false
     var responseUserCollapsed = false
     var queries: [SessionQuery] = []
+    /// Discoverable commands for this tab; filtered to skills + mcp.
+    var commands: [PiCommand] = []
     var selectedQueryID: String?
     var rawText = ""
     var tape: [String] = []
@@ -3056,6 +3295,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let responseWebView: WKWebView
     let queryPopup: NSPopUpButton
     let thinkingButton: IconButton
+    let commandPalette: CommandPaletteView
+    let commandPalettePanel: CommandPalettePanel
 
     private var responseExpanded = false
     private var responseUserCollapsed = false
@@ -3068,6 +3309,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     /// mode only). Cleared after a send or when switching tabs.
     private var pendingImages: [[String: Any]] = []
     private var pendingImageNames: [String] = []
+    /// Captures `notify` records produced by the MCP command.
+    private var mcpCaptureToken = 0
+    private var mcpCaptureLines: [String] = []
+    private var mcpCaptureUntil: Date?
 
     private let speech = SpeechInput()
     private var voiceBase = ""
@@ -3626,6 +3871,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         topDivider.layer?.backgroundColor = Theme.border.cgColor
         container.addSubview(topDivider)
 
+        commandPalette = CommandPaletteView(frame: .zero)
+        commandPalettePanel = CommandPalettePanel()
+        commandPalettePanel.contentView = commandPalette
+
         responseWebView = WKWebView(frame: .zero, configuration: WKWebViewConfiguration())
         responseWebView.wantsLayer = true
         responseWebView.layer?.cornerRadius = Theme.responseRadius
@@ -3639,6 +3888,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         window.delegate = self
         keyTape.controller = self
+        commandPalette.onAccept = { [weak self] command in
+            self?.acceptCommand(command)
+        }
         keyTape.onStatusChange = { [weak self] _ in self?.updateSendButton() }
         // native caret; no manual blink timer needed.
         voiceButton.target = self
@@ -5357,6 +5609,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         focusOverlay()
+        updateCommandPalette()
 
         debugLog("rpc tab active dir=\(directory?.path ?? "blank") host=\(tab.remoteHost?.display ?? "local")")
     }
@@ -5499,6 +5752,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tab.isLaunching = false
             session.requestState()
             session.requestModels()
+            session.requestCommands()
             // Load the resumed session's last answer and prompt history so the
             // response panel and query dropdown are populated immediately.
             session.requestLastAssistantText()
@@ -6051,6 +6305,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         session.requestState()
                         session.requestLastAssistantText()
                         session.requestEntries()
+                        session.requestCommands()
                         if isActive {
                             responseText = ""
                             responseExpanded = false
@@ -6095,6 +6350,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         session.requestState()
                         session.requestLastAssistantText()
                         session.requestEntries()
+                        session.requestCommands()
                         if isActive {
                             responseText = ""
                             responseExpanded = false
@@ -6177,6 +6433,20 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         if isActive {
                             rebuildModelMenu()
                         }
+                    }
+
+                case "get_commands":
+                    let parsed = (data?["commands"] as? [[String: Any]] ?? [])
+                        .compactMap(PiCommand.init(json:))
+                    tab.commands = parsed.filter {
+                        $0.source == "skill" || $0.name == "mcp"
+                    }
+                    debugLog(
+                        "rpc commands tab=\(tabTitle(tab)) total=\(parsed.count) "
+                            + "kept=\(tab.commands.count)"
+                    )
+                    if isActive {
+                        updateCommandPalette()
                     }
 
                 case "set_model":
@@ -6286,6 +6556,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         case "notify":
             if let message = request["message"] as? String {
                 debugLog("rpc notify[\(tabID)]: \(message)")
+                if let until = mcpCaptureUntil, Date() < until {
+                    mcpCaptureLines.append(message)
+                }
             }
         case "confirm", "select", "input", "editor":
             dialogQueue.append((tabID, request))
@@ -6533,6 +6806,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     func shutdown() {
+        commandPalettePanel.orderOut(nil)
         // Do not autosave the 96 pt compact frame for the next launch.
         if isCompact, let frame = compactRestoreFrame {
             isCompact = false
@@ -6897,6 +7171,132 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     /// The pill is Send while idle and Cancel while a turn is running. Cancel
     /// sends `abort` to the RPC session (or Escape to a TTY backend).
+    // MARK: - Slash commands (/skill, /mcp)
+
+    /// Returns the first token after `/`, or nil when arguments have started.
+    private func slashToken(from text: String) -> String? {
+        guard text.hasPrefix("/") else { return nil }
+        let rest = text.dropFirst()
+        let token = rest.prefix { $0 != " " && $0 != "\t" && $0 != "\n" }
+        guard token.count == rest.count else { return nil }
+        return String(token)
+    }
+
+    private func updateCommandPalette() {
+        guard mode == .selfHost,
+              !isMinimized,
+              !isCompact,
+              let tab = activeRpcTab,
+              !tab.commands.isEmpty,
+              let token = slashToken(from: keyTape.text) else {
+            hideCommandPalette()
+            return
+        }
+
+        let query = token.lowercased()
+        var candidates: [PiCommand] = []
+
+        if query.isEmpty || "skill".hasPrefix(query) || query.hasPrefix("skill") {
+            let matchesWholeGroup = query.isEmpty || "skill".hasPrefix(query)
+            candidates += tab.commands.filter { command in
+                guard command.source == "skill" else { return false }
+                if matchesWholeGroup { return true }
+                return command.name.lowercased().hasPrefix(query)
+            }
+        }
+        if "mcp".hasPrefix(query) {
+            candidates += tab.commands.filter { $0.name == "mcp" }
+        }
+
+        guard !candidates.isEmpty else {
+            hideCommandPalette()
+            return
+        }
+
+        commandPalette.setCommands(candidates)
+        positionCommandPalette()
+        commandPalettePanel.orderFrontRegardless()
+    }
+
+    private func hideCommandPalette() {
+        commandPalettePanel.orderOut(nil)
+    }
+
+    private func positionCommandPalette() {
+        guard window.contentView != nil else { return }
+        let input = keyTape.convert(keyTape.bounds, to: nil)
+        let screenRect = window.convertToScreen(input)
+        let visible = (window.screen ?? NSScreen.main)?.visibleFrame
+
+        var width = max(320, screenRect.width)
+        if let visible { width = min(width, max(320, visible.width - 8)) }
+
+        var height = commandPalette.preferredHeight
+        var originY = screenRect.maxY + 8
+        if let visible {
+            let available = max(120, visible.maxY - originY - 8)
+            height = min(height, available)
+            if originY + height > visible.maxY {
+                originY = visible.maxY - height
+            }
+        }
+
+        var originX = screenRect.minX
+        if let visible {
+            originX = min(
+                max(originX, visible.minX + 4),
+                visible.maxX - width - 4
+            )
+        }
+
+        commandPalettePanel.setFrame(
+            NSRect(x: originX, y: originY, width: width, height: height),
+            display: true
+        )
+        commandPalette.needsLayout = true
+    }
+
+    private func acceptCommand(_ command: PiCommand) {
+        let token = slashToken(from: keyTape.text)?.lowercased()
+        hideCommandPalette()
+
+        if token == command.name.lowercased() {
+            // The user already typed the exact command; execute it.
+            keyTape.setText("/" + command.name)
+            rawText = keyTape.text
+            sendPrompt()
+        } else {
+            // Insert the selected command and leave the caret after it.
+            let newText = "/" + command.name + " "
+            keyTape.setText(newText)
+            rawText = newText
+            updateCommandPalette()
+            focusOverlay()
+        }
+    }
+
+    /// `/mcp` reports server status through `notify` records in RPC mode.
+    /// Collect them briefly and show a small sheet with the output.
+    private func startMCPCapture() {
+        mcpCaptureToken += 1
+        let token = mcpCaptureToken
+        mcpCaptureLines = []
+        mcpCaptureUntil = Date().addingTimeInterval(3)
+        debugLog("mcp capture start token=\(token)")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3.2) { [weak self] in
+            guard let self, self.mcpCaptureToken == token else { return }
+            self.mcpCaptureToken = 0
+            self.mcpCaptureUntil = nil
+            let lines = self.mcpCaptureLines
+            self.mcpCaptureLines = []
+            debugLog("mcp capture end lines=\(lines.count)")
+            guard !lines.isEmpty,
+                  self.window.isVisible,
+                  self.window.attachedSheet == nil else { return }
+            self.showAlert(title: "MCP", message: lines.joined(separator: "\n"))
+        }
+    }
+
     @objc private func sendFromButton() {
         if isProcessingActive {
             cancelActiveTurn()
@@ -7137,6 +7537,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     /// keep running, and the menu-bar icon brings the overlay back.
     @objc func hideOverlay() {
         guard window.isVisible else { return }
+        hideCommandPalette()
         window.orderOut(nil)
         debugLog("hidden; reopen from the menu-bar icon")
     }
@@ -7311,6 +7712,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     private func enterCompact() {
         guard !isCompact else { return }
+        hideCommandPalette()
         if isMinimized { toggleMinimize() }
         if speech.isListening { stopVoice() }
 
@@ -7539,6 +7941,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         let height = container.bounds.height
 
         if isCompact {
+            hideCommandPalette()
             layoutCompact(width: width, height: height)
             window.invalidateCursorRects(for: container)
             updateResponseButton()
@@ -7800,6 +8203,14 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         window.invalidateCursorRects(for: container)
         updateResponseButton()
         updateSendButton()
+
+        if commandPalettePanel.isVisible {
+            if isMinimized {
+                hideCommandPalette()
+            } else {
+                positionCommandPalette()
+            }
+        }
     }
 
     /// Dev-only: inject a prompt into the active tab (PI_OVERLAY_TEST_PROMPT).
@@ -7891,6 +8302,40 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 tab: tab,
                 isActive: true
             )
+        }
+        if ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_COMMANDS"] == "1" {
+            tab.commands = [
+                PiCommand(json: [
+                    "name": "skill:ascii-diagram",
+                    "description": "Render ASCII box-drawing diagrams to PNG.",
+                    "source": "skill",
+                ]),
+                PiCommand(json: [
+                    "name": "skill:explainer-video",
+                    "description": "Write a script and storyboard for a short explainer.",
+                    "source": "skill",
+                ]),
+                PiCommand(json: [
+                    "name": "skill:wrapped-video",
+                    "description": "Build a Spotify Wrapped style data video.",
+                    "source": "skill",
+                ]),
+                PiCommand(json: [
+                    "name": "mcp",
+                    "description": "Manage MCP servers: sign in, reconnect, enable or disable.",
+                    "source": "extension",
+                ]),
+            ].compactMap { $0 }
+            keyTape.setText("/")
+            updateCommandPalette()
+            commandPalette.layoutSubtreeIfNeeded()
+            if let content = commandPalettePanel.contentView,
+               let rep = content.bitmapImageRepForCachingDisplay(in: content.bounds) {
+                content.cacheDisplay(in: content.bounds, to: rep)
+                if let data = rep.representation(using: .png, properties: [:]) {
+                    try? data.write(to: URL(fileURLWithPath: path + ".palette.png"))
+                }
+            }
         }
         if ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_THINKING"] == "1" {
             tab.showThinking = true
@@ -8042,6 +8487,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         layoutViews()
     }
 
+    func windowDidMove(_ notification: Notification) {
+        if commandPalettePanel.isVisible {
+            positionCommandPalette()
+        }
+    }
+
     // MARK: - Prompt box key handling
 
     /// Cmd chords the overlay owns. Returns true when the chord was consumed;
@@ -8085,6 +8536,39 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
 
         if mods.contains(.command), handlePromptKeyEquivalent(event) { return true }
+
+        if commandPalettePanel.isVisible,
+           !mods.contains(.command),
+           !mods.contains(.control),
+           !mods.contains(.option) {
+            switch event.keyCode {
+            case 126:                       // up
+                commandPalette.moveSelection(-1)
+                return true
+            case 125:                       // down
+                commandPalette.moveSelection(1)
+                return true
+            case 48:                        // tab
+                if let command = commandPalette.selectedCommand() {
+                    acceptCommand(command)
+                }
+                return true
+            case 36, 76:                    // return / keypad enter
+                if mods.contains(.shift) {
+                    hideCommandPalette()
+                    return false
+                }
+                if let command = commandPalette.selectedCommand() {
+                    acceptCommand(command)
+                }
+                return true
+            case 53:                        // escape
+                hideCommandPalette()
+                return true
+            default:
+                break
+            }
+        }
 
         // Ctrl chords.
         if mods.contains(.control) {
@@ -8146,6 +8630,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     /// Called by the text box whenever the user edits the prompt.
     func promptTextChanged(_ text: String) {
         if rawText != text { rawText = text }
+        updateCommandPalette()
     }
 
     /// Sends the pending prompt through the active backend and clears the box
@@ -8158,6 +8643,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         // The text view is authoritative for what the user typed.
         let chunk = keyTape.text
         if rawText != chunk { rawText = chunk }
+
+        if isSelfMode, chunk == "/mcp" || chunk.hasPrefix("/mcp ") {
+            startMCPCapture()
+        }
 
         var sentOk = true
         if isSelfMode {
