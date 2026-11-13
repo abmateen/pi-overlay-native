@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Darwin
 import Foundation
+import QuartzCore
 import Speech
 import UniformTypeIdentifiers
 import WebKit
@@ -431,26 +432,57 @@ final class PillButton: NSButton {
 /// One discoverable pi command (`get_commands`). Only skills and the MCP
 /// command are kept for now.
 struct PiCommand: Equatable {
+    enum Action: Equatable {
+        case setSessionName
+    }
+
     let name: String
     let description: String
     let source: String
     let sourceInfo: String?
+    let action: Action?
+
+    init(
+        name: String,
+        description: String,
+        source: String,
+        sourceInfo: String? = nil,
+        action: Action? = nil
+    ) {
+        self.name = name
+        self.description = description
+        self.source = source
+        self.sourceInfo = sourceInfo
+        self.action = action
+    }
 
     init?(json: [String: Any]) {
         guard let name = json["name"] as? String, !name.isEmpty else { return nil }
-        self.name = name
-        self.description = (json["description"] as? String ?? "")
+        let description = (json["description"] as? String ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        self.source = json["source"] as? String ?? ""
+        let source = json["source"] as? String ?? ""
+        var sourceInfo: String?
         if let info = json["sourceInfo"] as? [String: Any] {
             var parts: [String] = []
             if let scope = info["scope"] as? String, !scope.isEmpty { parts.append(scope) }
             if let path = info["path"] as? String, !path.isEmpty { parts.append(path) }
-            self.sourceInfo = parts.isEmpty ? nil : parts.joined(separator: " · ")
-        } else {
-            self.sourceInfo = nil
+            sourceInfo = parts.isEmpty ? nil : parts.joined(separator: " · ")
         }
+        self.init(
+            name: name,
+            description: description,
+            source: source,
+            sourceInfo: sourceInfo,
+            action: nil
+        )
     }
+
+    static let sessionName = PiCommand(
+        name: "name",
+        description: "Set the session display name",
+        source: "builtin",
+        action: .setSessionName
+    )
 }
 
 /// One row in the slash-command palette.
@@ -3030,6 +3062,10 @@ final class RpcSession {
         _ = send(["type": "get_commands"])
     }
 
+    func setSessionName(_ name: String) {
+        _ = send(["type": "set_session_name", "name": name])
+    }
+
     func setModel(provider: String, modelId: String) {
         _ = send([
             "type": "set_model",
@@ -3203,6 +3239,8 @@ final class RpcTab {
     var models: [[String: Any]]?
     var sessionFile: String?
     var sessionName: String?
+    /// Name just set through /name; protects it from a stale get_state reply.
+    var pendingSessionName: String?
     var assistantText = ""
     var streamingText = ""
     /// Thinking/reasoning for the current turn and the live stream.
@@ -3258,6 +3296,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let terminalTitleLabel: NSTextField
     let directoryPopup: NSPopUpButton
     let modelPopup: NSPopUpButton
+    let modelRefreshButton: IconButton
     let pidLabel: NSTextField
     let tabBar: NSView
     let profilePopup: NSPopUpButton
@@ -3313,6 +3352,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private var mcpCaptureToken = 0
     private var mcpCaptureLines: [String] = []
     private var mcpCaptureUntil: Date?
+    /// Local key monitor for copying selected text from the response WebView.
+    private var responseCopyMonitor: Any?
 
     private let speech = SpeechInput()
     private var voiceBase = ""
@@ -3582,6 +3623,15 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         modelPopup.isHidden = mode != .selfHost
         modelPopup.toolTip = "Model for this pi RPC session"
         container.addSubview(modelPopup)
+
+        modelRefreshButton = IconButton(
+            symbol: "arrow.clockwise",
+            size: 13,
+            tint: Theme.textSecondary,
+            tooltip: "Refresh the available models"
+        )
+        modelRefreshButton.isHidden = mode != .selfHost
+        container.addSubview(modelRefreshButton)
 
         // Saved sessions for this directory (RPC self mode only)
         sessionLabel = NSTextField(labelWithString: "Sessions")
@@ -3891,6 +3941,21 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         commandPalette.onAccept = { [weak self] command in
             self?.acceptCommand(command)
         }
+        responseCopyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) {
+            [weak self] event in
+            guard let self else { return event }
+            let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+            let isCopyChord = (mods.contains(.control) || mods.contains(.command))
+                && !mods.contains(.shift)
+                && !mods.contains(.option)
+                && event.charactersIgnoringModifiers?.lowercased() == "c"
+            guard isCopyChord,
+                  let webView = self.responseWebViewIfFocused() else {
+                return event
+            }
+            self.copySelectionFromResponse(webView)
+            return nil
+        }
         keyTape.onStatusChange = { [weak self] _ in self?.updateSendButton() }
         // native caret; no manual blink timer needed.
         voiceButton.target = self
@@ -3936,6 +4001,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         responseButton.sendAction(on: [.leftMouseDown])
         queryPopup.target = self
         queryPopup.action = #selector(querySelected(_:))
+        modelRefreshButton.target = self
+        modelRefreshButton.action = #selector(refreshModels)
         thinkingButton.target = self
         thinkingButton.action = #selector(toggleThinking)
         newTabButton.target = self
@@ -5701,6 +5768,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         tab.status = .idle
         tab.sessionFile = resumePath
         tab.sessionName = nil
+        tab.pendingSessionName = nil
         tab.assistantText = ""
         tab.streamingText = ""
         tab.latestAnswerText = ""
@@ -6251,6 +6319,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     statusLabel.stringValue = "MODEL ERROR"
                     statusLabel.textColor = .systemRed
                     rebuildModelMenu()
+                } else if command == "get_available_models", isActive {
+                    statusLabel.stringValue = "MODEL REFRESH ERROR"
+                    statusLabel.textColor = .systemRed
+                } else if command == "set_session_name" {
+                    tab.pendingSessionName = nil
+                    session.requestState()
+                    if isActive {
+                        statusLabel.stringValue = "NAME ERROR"
+                        statusLabel.textColor = .systemRed
+                    }
                 }
             } else {
                 switch command {
@@ -6270,7 +6348,17 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     } else {
                         tab.sessionFile = nil
                     }
-                    tab.sessionName = data?["sessionName"] as? String
+                    if let pending = tab.pendingSessionName {
+                        if let returned = data?["sessionName"] as? String,
+                           returned == pending {
+                            tab.sessionName = returned
+                            tab.pendingSessionName = nil
+                        } else {
+                            tab.sessionName = pending
+                        }
+                    } else {
+                        tab.sessionName = data?["sessionName"] as? String
+                    }
                     if isActive {
                         rebuildModelMenu()
                         rebuildSessionMenu()
@@ -6296,6 +6384,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         tab.thinkingText = ""
                         tab.streamingThinking = ""
                         tab.lastError = nil
+                        tab.pendingSessionName = nil
                         tab.responseText = ""
                         tab.responseExpanded = false
                         tab.responseUserCollapsed = false
@@ -6346,6 +6435,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         tab.selectedQueryID = nil
                         tab.status = .idle
                         tab.sessionName = nil
+                        tab.pendingSessionName = nil
                         tab.sessionFile = nil
                         session.requestState()
                         session.requestLastAssistantText()
@@ -6432,7 +6522,27 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         tab.models = models
                         if isActive {
                             rebuildModelMenu()
+                            if statusLabel.stringValue == "REFRESHING MODELS" {
+                                debugLog(
+                                    "model refresh done tab=\(tabTitle(tab)) "
+                                        + "models=\(models.count)"
+                                )
+                                flashStatus("MODELS REFRESHED", tone: .ok)
+                            }
                         }
+                    }
+
+                case "set_session_name":
+                    if let pending = tab.pendingSessionName {
+                        tab.sessionName = pending
+                    }
+                    if isActive {
+                        debugLog(
+                            "session rename confirmed tab=\(tabTitle(tab)) "
+                                + "name=\(tab.sessionName ?? "")"
+                        )
+                        flashStatus("SESSION NAMED", tone: .ok)
+                        refreshSessionRow()
                     }
 
                 case "get_commands":
@@ -6806,6 +6916,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     func shutdown() {
+        if let responseCopyMonitor {
+            NSEvent.removeMonitor(responseCopyMonitor)
+            self.responseCopyMonitor = nil
+        }
         commandPalettePanel.orderOut(nil)
         // Do not autosave the 96 pt compact frame for the next launch.
         if isCompact, let frame = compactRestoreFrame {
@@ -7171,6 +7285,144 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     /// The pill is Send while idle and Cancel while a turn is running. Cancel
     /// sends `abort` to the RPC session (or Escape to a TTY backend).
+    /// The visible response WebView when WebKit (or one of its subviews) owns
+    /// the first responder. Used to scope copy shortcuts to the response area.
+    private func responseWebViewIfFocused() -> WKWebView? {
+        let webView: WKWebView?
+        if mode == .selfHost {
+            guard let tab = activeRpcTab,
+                  tab.responseExpanded,
+                  !tab.webView.isHidden else { return nil }
+            webView = tab.webView
+        } else {
+            guard responseExpanded, !responseWebView.isHidden else { return nil }
+            webView = responseWebView
+        }
+        guard let webView else { return nil }
+        var responder: NSResponder? = window.firstResponder
+        while let current = responder {
+            if current === webView { return webView }
+            if let view = current as? NSView, view.isDescendant(of: webView) {
+                return webView
+            }
+            responder = current.nextResponder
+        }
+        return nil
+    }
+
+    /// Copies the WebView selection, or the whole response when nothing is
+    /// selected. This makes Ctrl+C and Cmd+C work after clicking into the
+    /// rendered answer.
+    private func copySelectionFromResponse(_ webView: WKWebView) {
+        let script = "(window.getSelection && String(window.getSelection())) || ''"
+        webView.evaluateJavaScript(script) { [weak self] result, _ in
+            guard let self else { return }
+            let selection = (result as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            debugLog("response copy selection chars=\(selection.count)")
+            if selection.isEmpty {
+                self.copyResponse()
+            } else {
+                let pasteboard = NSPasteboard.general
+                pasteboard.clearContents()
+                pasteboard.setString(selection, forType: .string)
+                self.flashStatus("COPIED", tone: .ok)
+            }
+        }
+    }
+
+    /// Handles `/name` and `/name <value>` without sending it to the TUI-only
+    /// built-in command. With no argument, asks for a name.
+    private func handleSessionNameCommand(_ text: String) -> Bool {
+        guard mode == .selfHost else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == "/name" || trimmed.hasPrefix("/name ") else { return false }
+
+        let name = String(trimmed.dropFirst("/name".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        keyTape.setText("")
+        rawText = ""
+        tape.removeAll()
+        if name.isEmpty {
+            promptForSessionName()
+        } else {
+            applySessionName(name)
+        }
+        return true
+    }
+
+    private func promptForSessionName() {
+        guard mode == .selfHost, let tab = activeRpcTab else { return }
+        if isMinimized { toggleMinimize() }
+
+        let alert = NSAlert()
+        alert.messageText = "Name this session"
+        alert.informativeText = "The name appears in the Sessions list."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Cancel")
+
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 300, height: 24))
+        field.stringValue = tab.sessionName ?? ""
+        field.placeholderString = "Session name"
+        alert.accessoryView = field
+        alert.window.initialFirstResponder = field
+
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn else {
+                self?.focusOverlay()
+                return
+            }
+            let name = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else {
+                self.focusOverlay()
+                return
+            }
+            self.applySessionName(name)
+        }
+    }
+
+    private func applySessionName(_ name: String) {
+        guard mode == .selfHost,
+              let tab = activeRpcTab,
+              let session = tab.session,
+              session.isRunning else {
+            flashStatus("NO PI SESSION", tone: .bad)
+            return
+        }
+        tab.sessionName = name
+        tab.pendingSessionName = name
+        session.setSessionName(name)
+        statusLabel.stringValue = "RENAMING SESSION"
+        statusLabel.textColor = .systemOrange
+        debugLog("session rename tab=\(tabTitle(tab)) name=\(name)")
+        focusOverlay()
+    }
+
+    @objc private func refreshModels() {
+        guard mode == .selfHost,
+              let tab = activeRpcTab,
+              let session = tab.session,
+              session.isRunning else {
+            flashStatus("NO PI SESSION", tone: .bad)
+            return
+        }
+        session.requestModels()
+        spinModelRefreshButton()
+        statusLabel.stringValue = "REFRESHING MODELS"
+        statusLabel.textColor = .systemOrange
+        debugLog("model refresh requested tab=\(tabTitle(tab))")
+    }
+
+    private func spinModelRefreshButton() {
+        guard let layer = modelRefreshButton.layer else { return }
+        let animation = CABasicAnimation(keyPath: "transform.rotation.z")
+        animation.fromValue = 0
+        animation.toValue = -2 * Double.pi
+        animation.duration = 0.7
+        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(animation, forKey: "model-refresh-spin")
+    }
+
     // MARK: - Slash commands (/skill, /mcp)
 
     /// Returns the first token after `/`, or nil when arguments have started.
@@ -7206,6 +7458,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
         if "mcp".hasPrefix(query) {
             candidates += tab.commands.filter { $0.name == "mcp" }
+        }
+        if query.isEmpty || "name".hasPrefix(query) {
+            candidates.append(.sessionName)
         }
 
         guard !candidates.isEmpty else {
@@ -7259,6 +7514,17 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private func acceptCommand(_ command: PiCommand) {
         let token = slashToken(from: keyTape.text)?.lowercased()
         hideCommandPalette()
+
+        if command.action == .setSessionName {
+            // The handler in sendPrompt parses arguments or opens the name
+            // sheet, and clears the prompt.
+            if token != command.name.lowercased() {
+                keyTape.setText("/" + command.name)
+                rawText = keyTape.text
+            }
+            sendPrompt()
+            return
+        }
 
         if token == command.name.lowercased() {
             // The user already typed the exact command; execute it.
@@ -7839,7 +8105,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         let hiddenViews: [NSView] = [
             tabBar, statusLabel, targetLabel, terminalTitleLabel,
-            directoryPopup, modelPopup, pidLabel, sessionIcon, sessionLabel,
+            directoryPopup, modelPopup, modelRefreshButton, pidLabel, sessionIcon, sessionLabel,
             sessionPopup, newSessionButton, headerDivider,
             responseButton, responseDivider, queryPopup, thinkingButton, responseWebView,
             responseCopyButton, responseDownloadButton, responseExpandButton,
@@ -8038,9 +8304,14 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         let contentX: CGFloat = dividerX + 15
         let pidWidth: CGFloat = 100
         let pidX = width - 16 - pidWidth
+        let refreshWidth: CGFloat = 30
+        let refreshGap: CGFloat = 6
         let available: CGFloat = max(180, pidX - 10 - contentX)
         let directoryWidth: CGFloat = max(150, min(available * 0.46, available - 140 - 8))
-        let modelWidth: CGFloat = max(120, available - directoryWidth - 8)
+        let modelWidth: CGFloat = max(
+            120,
+            available - directoryWidth - 8 - refreshWidth - refreshGap
+        )
 
         if isSelfMode {
             directoryPopup.frame = NSRect(
@@ -8054,6 +8325,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 y: headerRowY,
                 width: modelWidth,
                 height: headerRowHeight
+            )
+            modelRefreshButton.frame = NSRect(
+                x: modelPopup.frame.maxX + refreshGap,
+                y: headerRowY + 2,
+                width: refreshWidth,
+                height: headerRowHeight - 4
             )
             pidLabel.frame = NSRect(x: pidX, y: headerRowY + 8, width: pidWidth, height: 20)
         } else {
@@ -8070,6 +8347,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         terminalTitleLabel.isHidden = isSelfMode || collapseHeader
         directoryPopup.isHidden = !isSelfMode || collapseHeader
         modelPopup.isHidden = mode != .selfHost || collapseHeader
+        modelRefreshButton.isHidden = mode != .selfHost || collapseHeader
         pidLabel.isHidden = mode != .selfHost || collapseHeader
         headerDivider.isHidden = !isSelfMode || collapseHeader
         statusLabel.isHidden = collapseHeader
@@ -8214,6 +8492,23 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     /// Dev-only: inject a prompt into the active tab (PI_OVERLAY_TEST_PROMPT).
+    /// Dev-only: trigger the model refresh button (PI_OVERLAY_TEST_REFRESH).
+    func refreshModelsForTesting() {
+        refreshModels()
+    }
+
+    /// Dev-only: exercise the response copy path (PI_OVERLAY_TEST_COPY).
+    func copyResponseForTesting() {
+        let webView: WKWebView?
+        if mode == .selfHost {
+            webView = activeRpcTab?.webView
+        } else {
+            webView = responseWebView
+        }
+        guard let webView else { return }
+        copySelectionFromResponse(webView)
+    }
+
     func sendPromptForTesting(_ text: String) {
         if ProcessInfo.processInfo.environment["PI_OVERLAY_TEST_THINKING"] == "1",
            let tab = activeRpcTab {
@@ -8647,6 +8942,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         if isSelfMode, chunk == "/mcp" || chunk.hasPrefix("/mcp ") {
             startMCPCapture()
         }
+        if handleSessionNameCommand(chunk) { return }
 
         var sentOk = true
         if isSelfMode {
@@ -8691,6 +8987,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
            !prompt.isEmpty {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
                 self.controller.sendPromptForTesting(prompt)
+            }
+        }
+        if ProcessInfo.processInfo.environment["PI_OVERLAY_TEST_REFRESH"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                self.controller.refreshModelsForTesting()
+            }
+        }
+        if ProcessInfo.processInfo.environment["PI_OVERLAY_TEST_COPY"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                self.controller.copyResponseForTesting()
             }
         }
         controller.installStatusItem()

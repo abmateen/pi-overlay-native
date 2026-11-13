@@ -64,7 +64,9 @@ move it.
   when the child is stopped, Close tab).
 - `[model ▾]` lists the configured pi models as `provider/model` (the same
   reference pi's `--model` flag takes) and switches the active tab's RPC session
-  with `set_model`. The provider's display name is in the item tooltip.
+  with `set_model`. The provider's display name is in the item tooltip. The
+  **↻** button beside it re-reads `get_available_models` (useful after changing
+  provider configuration) and spins while the request is in flight.
 - `pi 42165` is the live RPC child PID for the active tab.
 - The **Sessions** row is a dropdown listing the saved conversations for the
   active tab's directory, newest first. Entries show the session name (or the
@@ -89,7 +91,7 @@ move it.
 - The terminal window title is shown next to the TTY.
 - The large text area is a real text box: the caret, arrow keys, selection, mouse placement, undo, cut/copy/paste and word wrap are the native macOS ones.
 - The bottom-right status shows **Processing** while the agent is running and **Done** in green when it settles.
-- A collapsible **Response** section under the textbox renders the final assistant text as GitHub-flavored Markdown, including headings, tables, lists, code blocks, and emphasis. Thinking/reasoning is hidden by default (use the 💡 toggle). Provider errors, request timeouts and failed prompt commands are shown here too (as a **Request failed** block with the provider message) and in the prompt history; automatic retries show a **Request failed — retrying n/m** notice instead of leaving the panel blank. The **💡 thinking** toggle next to the prompt-history dropdown shows the model's visible reasoning: while a turn is generating it streams live under **Thinking**, followed by the partial answer under **Response**, and the finished turn keeps both.
+- A collapsible **Response** section under the textbox renders the final assistant text as GitHub-flavored Markdown, including headings, tables, lists, code blocks, and emphasis. Thinking/reasoning is hidden by default (use the 💡 toggle). Provider errors, request timeouts and failed prompt commands are shown here too (as a **Request failed** block with the provider message) and in the prompt history; automatic retries show a **Request failed — retrying n/m** notice instead of leaving the panel blank. The rendered answer is selectable; Ctrl+C or Cmd+C copies the selection, or the whole response when nothing is selected. The **💡 thinking** toggle next to the prompt-history dropdown shows the model's visible reasoning: while a turn is generating it streams live under **Thinking**, followed by the partial answer under **Response**, and the finished turn keeps both.
 - A **prompt history** dropdown beside the Response toggle lists the session's previous user prompts (newest first). Pick one to show the answer that followed it; **Latest answer** returns to the most recent turn. The list refreshes after each turn and when a session is loaded or switched. With no selection, the panel always shows the latest answer.
 
 ## Controls
@@ -105,6 +107,7 @@ move it.
 | **Ctrl + W** | Close the active tab |
 | **Cmd + 1…9** | Jump to the 1st…9th tab |
 | **Model dropdown** | Switch the active tab's model without restarting pi |
+| **↻ model refresh** | Reload the available model list from pi (next to the model dropdown) |
 | **Sessions dropdown** | Resume a saved session from this folder in the active tab |
 | **Connect to Remote Host…** | Folder dropdown → run `pi --mode rpc` on another machine over SSH (see [Remote sessions](#remote-sessions-ssh)) |
 | **＋ next to Sessions** | Start a new conversation in the active tab (like `/new`) |
@@ -125,6 +128,7 @@ move it.
 | **Send / Cancel** (⌘ ↵) | Send the pending prompt (same as Return). While a turn is running the same pill becomes **■ Cancel** and aborts it (same as Esc) |
 | **🖼 (image)** and **📎 (attach)** | Attach images to the next prompt, or insert file paths into it |
 | **💡 (thinking)** | Show/hide visible reasoning for the current answer; streams live while the turn is generating |
+| **Ctrl+C / Cmd+C in Response** | Copy the selected text from the rendered answer; with no selection, copy the whole response (including thinking when enabled) |
 | **Response icons** | Copy the answer (with thinking when enabled), save it as Markdown, or expand/collapse the panel |
 | **Notification click** | Brings the overlay back on the tab whose turn finished |
 | **Cmd + M** | Same as **▾ / ▴** |
@@ -137,13 +141,16 @@ toggle. It is not a global keylogger.
 ### Slash commands
 
 Typing `/` opens a small floating command list above the prompt card. For now
-it contains only the discoverable **skills** and the **MCP** command:
+it contains the discoverable **skills**, the **MCP** command, and `/name`:
 
 - `/skill` or `/skill:` lists the available `skill:name` commands; keep typing
   to filter.
 - `/mcp` runs pi's MCP command. Its status notifications are collected briefly
   and shown in a small **MCP** sheet (RPC mode prints status instead of
   opening the TUI manager).
+- `/name [name]` renames the current session; with no argument it opens a small
+  name sheet. The new name is stored through `set_session_name` and is used by
+  the session store/listings.
 - Up/Down moves the selection, Tab or Return accepts, Esc closes the list.
   Selecting a skill inserts `/skill:name ` so arguments can be added; an
   exactly typed command runs immediately.
