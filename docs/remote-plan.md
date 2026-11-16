@@ -1,6 +1,6 @@
 # Plan: remote RPC sessions (over SSH)
 
-> **Status:** R0–R3 implemented in `tty_overlay.swift` and documented in the README.
+> **Status:** R0–R3 implemented in `pi_overlay_native.swift` and documented in the README.
 > R4 (attach to an already-running remote pi via a broker) is not implemented.
 > Related: [`docs/self-mode-plan.md`](self-mode-plan.md), README "Self mode (default, RPC)".
 >

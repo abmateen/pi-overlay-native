@@ -1,6 +1,6 @@
 # Plan: `self` mode + directory picker (`Ctrl+N`)
 
-> **Status:** M1a and M1b implemented (`tty_overlay.swift`, `Info.plist`, README).
+> **Status:** M1a and M1b implemented (`pi_overlay_native.swift`, `Info.plist`, README).
 > M2 was replaced by the RPC backend: `--mode self` now spawns `pi --mode rpc`
 > and drives status/response directly from the JSONL event stream. The Terminal
 > launcher remains available as `--mode self-tui`.
@@ -9,7 +9,7 @@
 
 Make the overlay usable as a standalone app:
 
-- Launching `tty_overlay_native` **without** `--mode` starts a pi process itself,
+- Launching `pi-overlay-native` **without** `--mode` starts a pi process itself,
   in a directory the user picks. That becomes `--mode self`.
 - The overlay header gets a **directory dropdown** (current dir + recents +
   "Choose Folder…").
@@ -45,11 +45,11 @@ M1 is independently useful; M2 restores feature parity with `tty` mode.
 ### 3.1 Mode / CLI
 
 ```
-tty_overlay_native                       -> self (changed)
-tty_overlay_native --mode self           -> self
-tty_overlay_native --mode self --dir ~/x -> self, initial dir ~/x
-tty_overlay_native --mode tty --tty ...  -> unchanged (extension path)
-tty_overlay_native --mode dry            -> unchanged debug mode
+pi-overlay-native                       -> self (changed)
+pi-overlay-native --mode self           -> self
+pi-overlay-native --mode self --dir ~/x -> self, initial dir ~/x
+pi-overlay-native --mode tty --tty ...  -> unchanged (extension path)
+pi-overlay-native --mode dry            -> unchanged debug mode
 ```
 
 Initial directory resolution order:
@@ -137,7 +137,7 @@ overlay socket server  ->  handleIPCEvent(status/response)
 
 ## 5. File-by-file changes
 
-### 5.1 `tty_overlay.swift`
+### 5.1 `pi_overlay_native.swift`
 
 #### a. Mode + argument parsing (lines 34–40, 1053–1081)
 
@@ -355,7 +355,7 @@ Control changes them.)
 
 **Manual matrix**
 
-1. `./tty_overlay_native` (no args) → self mode, pi starts in `$HOME`/last dir.
+1. `./pi-overlay-native` (no args) → self mode, pi starts in `$HOME`/last dir.
 2. `--mode self --dir "/tmp/a b/c"` → correct cwd, quoting intact.
 3. `--mode tty --tty /dev/ttysXXX` → old behavior byte-for-byte (extension).
 4. `--mode dry` → old debug behavior.

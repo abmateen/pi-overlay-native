@@ -5,13 +5,13 @@
   <key>CFBundleIdentifier</key>
   <string>com.abmateen.pi-overlay</string>
   <key>CFBundleName</key>
-  <string>TTYOverlay</string>
+  <string>PiOverlayNative</string>
   <key>CFBundleExecutable</key>
-  <string>tty_overlay_native</string>
+  <string>pi-overlay-native</string>
   <key>LSUIElement</key>
   <true/>
   <key>CFBundleDisplayName</key>
-  <string>TTY Overlay</string>
+  <string>pi-overlay-native</string>
   <key>CFBundleVersion</key>
   <string>1.0</string>
   <key>CFBundleShortVersionString</key>
@@ -21,10 +21,10 @@
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSMicrophoneUsageDescription</key>
-  <string>TTY Overlay uses the microphone for voice input.</string>
+  <string>pi-overlay-native uses the microphone for voice input.</string>
   <key>NSSpeechRecognitionUsageDescription</key>
-  <string>TTY Overlay converts speech to text for the terminal input.</string>
+  <string>pi-overlay-native converts speech to text for the terminal input.</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>TTY Overlay opens pi in a Terminal window and sends your prompt to it.</string>
+  <string>pi-overlay-native opens pi in a Terminal window and sends your prompt to it.</string>
 </dict>
 </plist>

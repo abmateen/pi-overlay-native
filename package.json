@@ -1,9 +1,9 @@
 {
-  "name": "pi-overlay-extension",
+  "name": "pi-overlay-native",
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Native macOS TTY overlay for pi sessions",
+  "description": "Native macOS overlay UI for pi sessions",
   "scripts": {
     "build": "make",
     "clean": "make clean"

@@ -1,5 +1,6 @@
-BIN := tty_overlay_native
-SWIFT := tty_overlay.swift
+BIN := pi-overlay-native
+LEGACY_BIN := pi-oui pi-overlay tty_overlay_native
+SWIFT := pi_overlay_native.swift
 SWIFTC ?= swiftc
 
 NOTIFIER := PiOverlayNotifier.app
@@ -37,7 +38,7 @@ install-notifier: $(NOTIFIER_DIR)
 	@echo "installed $(HOME)/Applications/$(NOTIFIER)"
 
 clean:
-	rm -f $(BIN)
+	rm -f $(BIN) $(LEGACY_BIN)
 	rm -rf build/$(NOTIFIER)
 
 run: $(BIN)

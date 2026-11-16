@@ -1,4 +1,4 @@
-# pi-overlay-extension
+# pi-overlay-native
 
 A small native macOS overlay for [pi](https://github.com/earendil-works/pi) sessions.
 
@@ -18,8 +18,8 @@ sit the status pill, folder/model dropdowns and the pi/ssh PID chip, then the
 Sessions row and the large prompt card.
 
 ```text
-[👤 daily ▾] [ ✓ pi-overlay-extension × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ▯  ⌄  ×
-READY  │  [📁 pi-overlay-extension ▾]  [DeepSeek V4.1 Flash ▾]  [pi 42165]
+[👤 daily ▾] [ ✓ pi-overlay-native × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ▯  ⌄  ×
+READY  │  [📁 pi-overlay-native ▾]  [DeepSeek V4.1 Flash ▾]  [pi 42165]
 💬 Sessions  [fix markdown tables · Oct 24                    ▾]  ＋
 ┌────────────────────────────────────────────────────────────────────────┐
 │ type…                                                                  │
@@ -38,7 +38,7 @@ capsule-shaped prompt on a transparent window: mic, text, `pi`/`ssh` pid, and
 the Send/Cancel pill. Above the capsule's right end sit an **eye** button (hide
 the overlay; reopen it from the menu-bar icon) and a **⤢** button that brings the
 full overlay back. A small translucent caption above the capsule names the
-profile and tab the prompt will go to (e.g. `localllm · pi-overlay`). The
+profile and tab the prompt will go to (e.g. `localllm · pi-overlay-native`). The
 capsule opens bottom-centre on the current screen, with a 28 pt gap above the
 Dock/screen edge, and returns to the previous window frame when you restore.
 Enter sends, Shift+Enter inserts a newline, Esc cancels the running turn, and
@@ -82,9 +82,10 @@ move it.
   prompt started there finishes while you are in another profile; switching back
   shows the result. Its menu also has New/Rename/Delete Profile (deleting stops
   those children).
-- A **menu-bar status icon** mirrors all profiles: an orange hourglass while any
-  tab is processing, a green check when the most recent work completed, and a
-  neutral terminal when idle. Its menu lists every profile with pending/completed
+- A **menu-bar status icon** (a bold π) mirrors all profiles: an orange π while
+  any tab is processing, a green π when the most recent work completed, and a
+  neutral template π when idle (it follows the menu-bar appearance). Its menu
+  lists every profile with pending/completed
   counts plus each profile's tabs; pick a profile or tab to switch to it and
   show the overlay. Its **Show Overlay** item also brings back a hidden window,
   and it is installed in every mode so hiding is never a one-way trip.
@@ -141,7 +142,8 @@ toggle. It is not a global keylogger.
 ### Slash commands
 
 Typing `/` opens a small floating command list above the prompt card. For now
-it contains the discoverable **skills**, the **MCP** command, and `/name`:
+it contains the discoverable **skills**, the **MCP** command, `/name`, and
+`/reload`:
 
 - `/skill` or `/skill:` lists the available `skill:name` commands; keep typing
   to filter.
@@ -151,6 +153,9 @@ it contains the discoverable **skills**, the **MCP** command, and `/name`:
 - `/name [name]` renames the current session; with no argument it opens a small
   name sheet. The new name is stored through `set_session_name` and is used by
   the session store/listings.
+- `/reload` restarts the active tab's pi RPC process, resuming the same session
+  file, so extensions, skills, prompt templates, models and configuration are
+  re-read. It is refused while a turn is running (`BUSY — CANNOT RELOAD`).
 - Up/Down moves the selection, Tab or Return accepts, Esc closes the list.
   Selecting a skill inserts `/skill:name ` so arguments can be added; an
   exactly typed command runs immediately.
@@ -171,9 +176,9 @@ first if the tab belongs to another one). Nothing is posted while the window is
 visible, and hiding does not lose anything — the notification is only a way
 back.
 
-The first notification asks macOS for permission for **pi overlay**. Allow it
+The first notification asks macOS for permission for **pi-overlay-native**. Allow it
 once; if the prompt was dismissed, enable it later under **System Settings →
-Notifications → pi overlay**.
+Notifications → pi-overlay-native**.
 
 Notifications are posted by a small helper app, `PiOverlayNotifier.app`
 (`notifier.swift`), because a process spawned by the pi extension is not
@@ -215,7 +220,7 @@ make
 This produces:
 
 ```text
-tty_overlay_native
+pi-overlay-native
 ```
 
 Notifications need the helper app, which has to live in a stable location for
@@ -231,7 +236,7 @@ The Markdown response panel also needs:
 markdown-it.min.js
 ```
 
-Keep it next to `tty_overlay_native`.
+Keep it next to `pi-overlay-native`.
 
 ## Run manually
 
@@ -239,7 +244,7 @@ From a terminal:
 
 ```bash
 ./run_overlay.sh        # tty mode, targeting the current terminal
-./tty_overlay_native    # self mode, launches its own pi session
+./pi-overlay-native    # self mode, launches its own pi session
 ```
 
 `run_overlay.sh` uses the current TTY and starts the overlay in `tty` mode.
@@ -249,22 +254,22 @@ From a terminal:
 Load it directly:
 
 ```bash
-pi --extension /absolute/path/to/pi-overlay-extension/extension.ts
+pi --extension /absolute/path/to/pi-overlay-native/extension.ts
 ```
 
 Or install it as a project extension:
 
 ```bash
 mkdir -p .pi/extensions
-cp /absolute/path/to/pi-overlay-extension/extension.ts .pi/extensions/tty-overlay.ts
+cp /absolute/path/to/pi-overlay-native/extension.ts .pi/extensions/pi-overlay-native.ts
 ```
 
-When installing the extension manually, copy both `tty_overlay_native` and `markdown-it.min.js` into the extension directory.
+When installing the extension manually, copy both `pi-overlay-native` and `markdown-it.min.js` into the extension directory.
 
 If the extension is copied away from the binary, set:
 
 ```bash
-export PI_OVERLAY_BIN=/absolute/path/to/pi-overlay-extension/tty_overlay_native
+export PI_OVERLAY_BIN=/absolute/path/to/pi-overlay-native/pi-overlay-native
 ```
 
 The extension:
@@ -278,7 +283,7 @@ The extension:
 - keeps the overlay running when you switch conversations (only `quit` and
   `reload` stop it), and reseeds it on the next `session_start`,
 - detects pi's TTY with `ps -o tty= -p <pi-pid>`,
-- starts `tty_overlay_native --mode tty --tty /dev/ttysXXX`,
+- starts `pi-overlay-native --mode tty --tty /dev/ttysXXX`,
 - does **not detach** the child, so it inherits pi's controlling TTY,
 - kills any old overlay for that TTY,
 - stops the overlay on `session_shutdown`,
@@ -291,8 +296,8 @@ It does **not** auto-start on session start.
 Running the binary with no mode argument starts its own pi process:
 
 ```bash
-./tty_overlay_native                      # pi in the last used directory
-./tty_overlay_native --dir ~/code/project # pi in a specific directory
+./pi-overlay-native                      # pi in the last used directory
+./pi-overlay-native --dir ~/code/project # pi in a specific directory
 ```
 
 The initial directory is resolved from `--dir`, then `PI_OVERLAY_DIR`, then the
@@ -527,7 +532,7 @@ Because RPC is headless, the overlay is the pi UI:
 The previous Terminal-launcher backend is still available:
 
 ```bash
-./tty_overlay_native --mode self-tui --dir ~/code/project
+./pi-overlay-native --mode self-tui --dir ~/code/project
 ```
 
 It launches `pi` in a new Terminal.app window and injects keystrokes with
@@ -540,25 +545,30 @@ The Swift binary supports:
 
 ```bash
 # Launch and own a headless RPC pi session in a directory (default)
-./tty_overlay_native --mode self --dir ~/code/project
+./pi-overlay-native --mode self --dir ~/code/project
 
 # Launch a pi TUI in Terminal.app and inject keystrokes
-./tty_overlay_native --mode self-tui --dir ~/code/project
+./pi-overlay-native --mode self-tui --dir ~/code/project
 
 # TIOCSTI injection into an existing TTY
-./tty_overlay_native --mode tty --tty /dev/ttys007
+./pi-overlay-native --mode tty --tty /dev/ttys007
 
 # AppleScript do-script mode, useful when TIOCSTI is unavailable
-./tty_overlay_native --mode terminal --tty /dev/ttys007
+./pi-overlay-native --mode terminal --tty /dev/ttys007
 
 # Show keys without sending them
-./tty_overlay_native --mode dry
+./pi-overlay-native --mode dry
 ```
 
 `tty` mode requires the overlay process to share the target terminal's controlling TTY. The pi extension achieves that by spawning the overlay without detaching.
 
 ## Notes
 
+- The app and binary are **pi-overlay-native**. Internal identifiers intentionally
+  keep the older `pi-overlay` name — `~/.config/pi-overlay`, the
+  `PI_OVERLAY_*` environment variables, the `com.abmateen.pi-overlay` bundle
+  ID, and `PiOverlayNotifier.app` — so existing profiles, scripts and macOS
+  permissions keep working.
 - The original Tk prototype is kept in `legacy/tk_overlay.py` for reference. The supported implementation is the Swift app.
 - In `tty` mode, status and final-response text are sent over a pipe (stdin).
 - The window frame (size and position) is saved under the `PiOverlayWindow`
@@ -566,7 +576,7 @@ The Swift binary supports:
   textbox keeps its normal height and any extra window height goes to the
   panel; when it is collapsed, the textbox takes the full area.
 - In `self` mode, status and final-response text come from pi's RPC event stream on stdout and are not stored in `/tmp`.
-- The overlay still writes a local debug log to `/tmp/tty_overlay_swift.log` and `/tmp/tty_overlay_events.log` in some builds. These files are not sent anywhere.
+- The overlay still writes a local debug log to `/tmp/pi-overlay-native.log` and `/tmp/tty_overlay_events.log` in some builds. These files are not sent anywhere.
 
 ## License
 

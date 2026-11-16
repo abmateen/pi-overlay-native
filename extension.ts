@@ -5,7 +5,8 @@ import { fileURLToPath } from "node:url";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const EXT_DIR = path.dirname(fileURLToPath(import.meta.url));
-const BINARY_NAME = "tty_overlay_native";
+const BINARY_NAME = "pi-overlay-native";
+const LEGACY_BINARY_NAMES = ["pi-oui", "pi-overlay", "tty_overlay_native"];
 
 let overlay: ChildProcess | null = null;
 let overlayTty: string | null = null;
@@ -30,8 +31,11 @@ function resolveBinary(ctx: ExtensionContext): string | null {
 	const candidates = [
 		process.env.PI_OVERLAY_BIN,
 		path.join(EXT_DIR, BINARY_NAME),
+		...LEGACY_BINARY_NAMES.map((name) => path.join(EXT_DIR, name)),
 		path.join(EXT_DIR, "build", BINARY_NAME),
+		...LEGACY_BINARY_NAMES.map((name) => path.join(EXT_DIR, "build", name)),
 		path.join(ctx.cwd, BINARY_NAME),
+		...LEGACY_BINARY_NAMES.map((name) => path.join(ctx.cwd, name)),
 	].filter((value): value is string => Boolean(value));
 
 	return candidates.find((candidate) => existsSync(candidate)) ?? null;

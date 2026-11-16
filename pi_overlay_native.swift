@@ -15,7 +15,7 @@ let TIOCSTI: UInt = 0x80017472 // macOS: _IOW('t', 114, char)
 
 func debugLog(_ message: String) {
     let line = "[\(Date())] \(message)\n"
-    let path = "/tmp/tty_overlay_swift.log"
+    let path = "/tmp/pi-overlay-native.log"
     if FileManager.default.fileExists(atPath: path) {
         if let data = line.data(using: .utf8),
            let fh = FileHandle(forWritingAtPath: path) {
@@ -434,6 +434,7 @@ final class PillButton: NSButton {
 struct PiCommand: Equatable {
     enum Action: Equatable {
         case setSessionName
+        case reloadPi
     }
 
     let name: String
@@ -482,6 +483,13 @@ struct PiCommand: Equatable {
         description: "Set the session display name",
         source: "builtin",
         action: .setSessionName
+    )
+
+    static let reload = PiCommand(
+        name: "reload",
+        description: "Restart the pi RPC process and reload extensions/skills",
+        source: "builtin",
+        action: .reloadPi
     )
 }
 
@@ -2414,7 +2422,7 @@ enum RemotePi {
         host: RemoteHost,
         path: String
     ) -> (path: String, pi: String?, error: String) {
-        let failure = PiLauncher.shellQuote("pi-overlay: cannot cd to \(path)")
+        let failure = PiLauncher.shellQuote("pi-overlay-native: cannot cd to \(path)")
         let script = """
         target=\(PiLauncher.shellQuote(path))
         \(homeExpansion(for: "target"))
@@ -2453,7 +2461,7 @@ enum RemotePi {
         host: RemoteHost,
         path: String
     ) -> (path: String, dirs: [String], error: String) {
-        let failure = PiLauncher.shellQuote("pi-overlay: cannot cd to \(path)")
+        let failure = PiLauncher.shellQuote("pi-overlay-native: cannot cd to \(path)")
         let script = """
         target=\(PiLauncher.shellQuote(path))
         \(homeExpansion(for: "target"))
@@ -2901,7 +2909,7 @@ final class RpcSession {
     /// the user's normal PATH; it never receives the local environment.
     static func remoteLaunchScript(directory: URL, sessionFile: String?) -> String {
         let quotedPath = PiLauncher.shellQuote(directory.path)
-        let failure = PiLauncher.shellQuote("pi-overlay: cannot cd to \(directory.path)")
+        let failure = PiLauncher.shellQuote("pi-overlay-native: cannot cd to \(directory.path)")
         var script = "target=\(quotedPath)\n"
         script += RemotePi.homeExpansion(for: "target") + "\n"
         script += "cd \"$target\" || { printf '%s\\n' \(failure) >&2; exit 9; }\n"
@@ -2914,7 +2922,7 @@ final class RpcSession {
                 + "\"$HOME/node_modules/.bin/pi\" /opt/homebrew/bin/pi /usr/local/bin/pi; "
                 + "do [ -x \"$c\" ] && { p=\"$c\"; break; }; done; fi\n"
             script += "if [ \"$p\" = pi ] && ! command -v pi >/dev/null 2>&1; then "
-                + "printf '%s\\n' 'pi-overlay: pi not found on the remote host "
+                + "printf '%s\\n' 'pi-overlay-native: pi not found on the remote host "
                 + "(set PI_OVERLAY_REMOTE_PI to its path)' >&2; exit 127; fi\n"
         }
         script += "exec \"$p\" --mode rpc"
@@ -3241,6 +3249,8 @@ final class RpcTab {
     var sessionName: String?
     /// Name just set through /name; protects it from a stale get_state reply.
     var pendingSessionName: String?
+    /// Set while /reload is restarting the RPC child.
+    var reloadPending = false
     var assistantText = ""
     var streamingText = ""
     /// Thinking/reasoning for the current turn and the live stream.
@@ -3500,7 +3510,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         window.minSize = NSSize(width: 720, height: mode == .selfHost ? 320 : 210)
         window.title = selfMode
             ? "pi · \(initialDirectory.lastPathComponent)"
-            : "TTY Overlay · \(ttyPath ?? "dry")"
+            : "pi-overlay-native · \(ttyPath ?? "dry")"
 
         // Remember the size/position the user drags out.
         window.setFrameAutosaveName("PiOverlayWindow")
@@ -4530,7 +4540,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.button?.imagePosition = .imageOnly
         item.button?.imageScaling = .scaleProportionallyDown
-        item.button?.toolTip = "pi overlay"
+        item.button?.toolTip = "pi-overlay-native"
         statusItem = item
         updateStatusItem()
     }
@@ -4564,41 +4574,50 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         statusItem.menu = statusMenu(rows: rows, processing: processing, done: done)
     }
 
+    /// Menu-bar icon: a bold Greek pi. Idle is a template image so it follows
+    /// the menu-bar appearance; processing/done tint the pi orange/green.
     private func statusImage(processing: Int, done: Int) -> NSImage? {
-        let symbol: String
-        let color: NSColor?
+        let color: NSColor
+        let template: Bool
         if processing > 0 {
-            symbol = "hourglass"
             color = .systemOrange
+            template = false
         } else if done > 0 {
-            symbol = "checkmark.circle.fill"
             color = .systemGreen
+            template = false
         } else {
-            symbol = "terminal"
-            color = nil
+            color = .black
+            template = true
         }
 
-        guard let base = NSImage(
-            systemSymbolName: symbol,
-            accessibilityDescription: "pi overlay status"
-        ) else { return nil }
-
-        let size = NSImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
-        if let color {
-            let palette = NSImage.SymbolConfiguration(paletteColors: [color])
-            let image = base.withSymbolConfiguration(size.applying(palette))
-            image?.isTemplate = false
-            return image
+        let image = NSImage(
+            size: NSSize(width: 18, height: 18),
+            flipped: false
+        ) { rect in
+            let font = NSFont.systemFont(ofSize: 15, weight: .bold)
+            let attrs: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: color,
+            ]
+            let text = "π" as NSString
+            let textSize = text.size(withAttributes: attrs)
+            text.draw(
+                at: NSPoint(
+                    x: (rect.width - textSize.width) / 2,
+                    y: (rect.height - textSize.height) / 2
+                ),
+                withAttributes: attrs
+            )
+            return true
         }
-        let image = base.withSymbolConfiguration(size)
-        image?.isTemplate = true
+        image.isTemplate = template
         return image
     }
 
     private func statusTooltip(processing: Int, done: Int) -> String {
-        if processing > 0 { return "pi — \(processing) processing" }
-        if done > 0 { return "pi — \(done) completed" }
-        return "pi overlay"
+        if processing > 0 { return "pi-overlay-native — \(processing) processing" }
+        if done > 0 { return "pi-overlay-native — \(done) completed" }
+        return "pi-overlay-native"
     }
 
     private func statusMenu(
@@ -4639,7 +4658,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         menu.addItem(.separator())
         let quit = NSMenuItem(
-            title: "Quit TTY Overlay",
+            title: "Quit pi-overlay-native",
             action: #selector(statusQuit),
             keyEquivalent: "q"
         )
@@ -5771,6 +5790,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         tab.pendingSessionName = nil
         tab.assistantText = ""
         tab.streamingText = ""
+        tab.thinkingText = ""
+        tab.streamingThinking = ""
+        tab.lastError = nil
         tab.latestAnswerText = ""
         tab.responseText = ""
         tab.responseExpanded = false
@@ -5792,7 +5814,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             sessionQueries = []
             selectedQueryID = nil
             rebuildQueryMenu()
-            statusLabel.stringValue = host == nil ? "STARTING PI" : "CONNECTING…"
+            statusLabel.stringValue = tab.reloadPending
+                ? "RELOADING PI"
+                : (host == nil ? "STARTING PI" : "CONNECTING…")
             statusLabel.textColor = .systemOrange
         }
 
@@ -5833,6 +5857,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             }
         } catch {
             tab.isLaunching = false
+            tab.reloadPending = false
             let message = error.localizedDescription
             debugLog("rpc launch failed: \(message)")
 
@@ -6363,6 +6388,13 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         rebuildModelMenu()
                         rebuildSessionMenu()
                     }
+                    if tab.reloadPending {
+                        tab.reloadPending = false
+                        if isActive {
+                            debugLog("pi reload confirmed tab=\(tabTitle(tab))")
+                            flashStatus("PI RELOADED", tone: .ok)
+                        }
+                    }
 
                 case "switch_session":
                     debugLog(
@@ -6385,6 +6417,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         tab.streamingThinking = ""
                         tab.lastError = nil
                         tab.pendingSessionName = nil
+                        tab.reloadPending = false
                         tab.responseText = ""
                         tab.responseExpanded = false
                         tab.responseUserCollapsed = false
@@ -6436,6 +6469,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         tab.status = .idle
                         tab.sessionName = nil
                         tab.pendingSessionName = nil
+                        tab.reloadPending = false
                         tab.sessionFile = nil
                         session.requestState()
                         session.requestLastAssistantText()
@@ -6620,6 +6654,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         tab.session = nil
         tab.status = .idle
         tab.exitStatus = status
+        tab.reloadPending = false
 
         if tab.id == activeRpcTabID {
             keyTape.agentStatus = .idle
@@ -7381,6 +7416,44 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
     }
 
+    private func handleReloadCommand(_ text: String) -> Bool {
+        guard mode == .selfHost else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == "/reload" else { return false }
+        keyTape.setText("")
+        rawText = ""
+        tape.removeAll()
+        reloadActivePiProcess()
+        return true
+    }
+
+    private func reloadActivePiProcess() {
+        guard mode == .selfHost,
+              let tab = activeRpcTab,
+              let directory = tab.directory else {
+            flashStatus("NO PI SESSION", tone: .bad)
+            return
+        }
+        guard let session = tab.session, session.isRunning else {
+            flashStatus("NO PI SESSION", tone: .bad)
+            return
+        }
+        guard !session.isStreaming, tab.status != .processing else {
+            flashStatus("BUSY — CANNOT RELOAD", tone: .warn)
+            return
+        }
+
+        tab.reloadPending = true
+        statusLabel.stringValue = "RELOADING PI"
+        statusLabel.textColor = .systemOrange
+        debugLog(
+            "pi reload tab=\(tabTitle(tab)) "
+                + "session=\((tab.sessionFile as NSString?)?.lastPathComponent ?? "new") "
+                + "host=\(tab.remoteHost?.display ?? "local")"
+        )
+        startRpcSession(in: tab, directory: directory, resumeLatest: false)
+    }
+
     private func applySessionName(_ name: String) {
         guard mode == .selfHost,
               let tab = activeRpcTab,
@@ -7415,11 +7488,31 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     private func spinModelRefreshButton() {
         guard let layer = modelRefreshButton.layer else { return }
-        let animation = CABasicAnimation(keyPath: "transform.rotation.z")
-        animation.fromValue = 0
-        animation.toValue = -2 * Double.pi
+
+        // Layer-backed NSViews use anchorPoint (0, 0), so a plain
+        // `transform.rotation.z` animation orbits around the button corner.
+        // Rotate around the button centre with explicit transform keyframes
+        // instead, leaving AppKit's layer geometry untouched.
+        let center = CGPoint(
+            x: modelRefreshButton.bounds.midX,
+            y: modelRefreshButton.bounds.midY
+        )
+        let steps = 12
+        var values: [CATransform3D] = []
+        for step in 0...steps {
+            let angle = -CGFloat.pi * 2 * CGFloat(step) / CGFloat(steps)
+            var transform = CATransform3DIdentity
+            transform = CATransform3DTranslate(transform, center.x, center.y, 0)
+            transform = CATransform3DRotate(transform, angle, 0, 0, 1)
+            transform = CATransform3DTranslate(transform, -center.x, -center.y, 0)
+            values.append(transform)
+        }
+
+        let animation = CAKeyframeAnimation(keyPath: "transform")
+        animation.values = values
         animation.duration = 0.7
-        animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        animation.calculationMode = .linear
+        animation.timingFunction = CAMediaTimingFunction(name: .linear)
         layer.add(animation, forKey: "model-refresh-spin")
     }
 
@@ -7461,6 +7554,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
         if query.isEmpty || "name".hasPrefix(query) {
             candidates.append(.sessionName)
+        }
+        if query.isEmpty || "reload".hasPrefix(query) {
+            candidates.append(.reload)
         }
 
         guard !candidates.isEmpty else {
@@ -7522,6 +7618,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 keyTape.setText("/" + command.name)
                 rawText = keyTape.text
             }
+            sendPrompt()
+            return
+        }
+        if command.action == .reloadPi {
+            keyTape.setText("/reload")
+            rawText = keyTape.text
             sendPrompt()
             return
         }
@@ -7718,7 +7820,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     }
 
     @objc private func openDebugLog() {
-        let url = URL(fileURLWithPath: "/tmp/tty_overlay_swift.log")
+        let url = URL(fileURLWithPath: "/tmp/pi-overlay-native.log")
         if FileManager.default.fileExists(atPath: url.path) {
             NSWorkspace.shared.open(url)
         }
@@ -8538,7 +8640,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         rpcTabs = []
         let tab = makeBlankTab()
-        tab.directory = URL(fileURLWithPath: NSHomeDirectory() + "/code/pi-overlay")
+        tab.directory = URL(fileURLWithPath: NSHomeDirectory() + "/code/pi-overlay-native")
         tab.currentModel = [
             "provider": "ollama-cloud",
             "id": "deepseek-v4.1-flash",
@@ -8587,7 +8689,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         responseText = tab.responseText
         responseExpanded = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_RESPONSE"] == "1"
         responseUserCollapsed = !responseExpanded
-        directoryPopup.title = "📁 pi-overlay-extension"
+        directoryPopup.title = "📁 pi-overlay-native"
         directoryPopup.toolTip = tab.directory?.path
         pidLabel.stringValue = "pi 6288"
         if ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_ERROR"] == "1" {
@@ -8943,6 +9045,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             startMCPCapture()
         }
         if handleSessionNameCommand(chunk) { return }
+        if handleReloadCommand(chunk) { return }
 
         var sentOk = true
         if isSelfMode {

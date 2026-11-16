@@ -3,8 +3,10 @@ set -eu
 cd "$(dirname "$0")"
 
 # Build if the binary is missing.
-[ -x ./tty_overlay_native ] || make
+[ -x ./pi-overlay-native ] || make
 
+pkill -f '[p]i-overlay-native .*--tty ' >/dev/null 2>&1 || true
+pkill -f '[p]i-overlay .*--tty ' >/dev/null 2>&1 || true
 pkill -f '[t]ty_overlay_native .*--tty ' >/dev/null 2>&1 || true
 
 TTY_NAME="$(ps -o tty= -p $$ | tr -d ' ')"
@@ -16,5 +18,5 @@ case "$TTY_NAME" in
   *) TTY_PATH="/dev/$TTY_NAME" ;;
 esac
 
-./tty_overlay_native --mode tty --tty "$TTY_PATH" &
+./pi-overlay-native --mode tty --tty "$TTY_PATH" &
 echo "overlay running (pid=$!) targeting $TTY_PATH"

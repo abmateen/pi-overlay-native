@@ -7,7 +7,7 @@
   <key>CFBundleName</key>
   <string>PiOverlayNotifier</string>
   <key>CFBundleDisplayName</key>
-  <string>pi overlay</string>
+  <string>pi-overlay-native</string>
   <key>CFBundleExecutable</key>
   <string>PiOverlayNotifier</string>
   <key>CFBundlePackageType</key>
