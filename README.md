@@ -30,7 +30,7 @@ READY  │  [📁 pi-overlay-native ▾]  [DeepSeek V4.1 ▾]  [🧠 high ▾]  
  ▸ Response  │  [Latest answer ▾]  💡                           ⧉   ⤓   ⤢
  ▤ answer panel…
 ──────────────────────────────────────────────────────────────────────────
-▮▮░░░░░  60.1k / 200k                                         ≈ 14.2 tok/s
+▮▮░░░░░  60.1k / 200k   ↓57.9k                   ≈ 14.2 tok/s
 ```
 
 In tty mode the label row shows the target terminal and window title instead of
@@ -107,7 +107,8 @@ move it.
 | **Option + V** | Start / stop voice input |
 | **Enter** | Send the pending line to the target TTY / pi session |
 | **Shift + Enter** | Insert a line break instead of sending |
-| **Esc** | Abort the running RPC turn (self mode) |
+| **Send pill** | Reads **■ Cancel** while a turn or a compaction is running; a send is refused during a compaction (`COMPACTING — CANNOT SEND`) |
+| **Esc** | Abort the running RPC turn (self mode), or a running compaction |
 | **Ctrl + N** | Choose a folder and open (or switch to) a pi session there |
 | **Ctrl + T** | New blank tab; choose its project directory |
 | **Ctrl + W** | Close the active tab |
@@ -156,6 +157,10 @@ The bottom strip shows two numbers for the active tab:
 - **token rate** — output tokens per second for the turn that is generating, or
   for the last one while idle. It reads in the accent colour while streaming and
   in the secondary colour once the turn has settled.
+- **compaction** — the tokens the last compaction freed, drawn as `↓57.9k` in green
+  after the usage number. Compaction is the only thing that moves the meter without
+  an answer, so the drop sits next to the number it produced; it is dropped when the
+  window is too narrow for it, and a session switch clears it.
 
 Providers only report `usage` in the final chunk of a stream, so mid-turn the
 rate is an **estimate** from the characters that have streamed (chars / 4 over the
@@ -198,8 +203,8 @@ name, and it is hidden in compact mode.
 ### Slash commands
 
 Typing `/` opens a small floating command list above the prompt card. For now
-it contains the discoverable **skills**, the **MCP** command, `/name`, and
-`/reload`:
+it contains the discoverable **skills**, the **MCP** command, `/name`, `/reload`,
+and `/compact`:
 
 - `/skill` or `/skill:` lists the available `skill:name` commands; keep typing
   to filter.
@@ -212,6 +217,19 @@ it contains the discoverable **skills**, the **MCP** command, `/name`, and
 - `/reload` restarts the active tab's pi RPC process, resuming the same session
   file, so extensions, skills, prompt templates, models and configuration are
   re-read. It is refused while a turn is running (`BUSY — CANNOT RELOAD`).
+- `/compact [instructions]` compacts the active tab's session with the RPC
+  `compact` command, the same summary pi writes for auto-compaction. Optional
+  text focuses the summary, e.g. `/compact focus on the parser changes`.
+  Self mode only: in tty mode the line is typed into the terminal and pi's TUI
+  handles it. The status pill reads **COMPACTING** while the summary is being
+  generated (pi aborts any turn in flight first), then **COMPACTED 65k → 22k**
+  with the before/after token counts, or `COMPACT ERROR` / `COMPACT CANCELLED`.
+  Auto-compaction reports the same way as `AUTO COMPACTED …`, and the footer
+  meter is seeded from the post-compaction estimate because pi's live usage is
+  null until the next answer, and the footer strip shows the freed amount as `↓43k`.
+  Nothing can be sent while a summary is running (`COMPACTING — CANNOT SEND`): the
+  Send pill reads **■ Cancel** for its whole duration, and pressing it (or Esc)
+  aborts the summary.
 - Up/Down moves the selection, Tab or Return accepts, Esc closes the list.
   Selecting a skill inserts `/skill:name ` so arguments can be added; an
   exactly typed command runs immediately.

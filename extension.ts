@@ -424,6 +424,20 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("thinking_level_select", (_event, ctx) => sendThinking(pi, ctx));
 
+	/**
+	 * Compaction happens in the terminal, not in the overlay, so this is the only
+	 * way the overlay learns about it in tty mode. Usage is null right after a
+	 * compaction, so the event carries the pre-compaction count and the meter waits
+	 * for the next usage event.
+	 */
+	pi.on("session_compact", (event, ctx) => {
+		sendEvent({ type: "compact", tokensBefore: event.compactionEntry.tokensBefore, reason: event.reason });
+		// A compaction is a new rate window: the streamed characters it discarded must
+		// not keep inflating the estimate.
+		resetUsage();
+		sendUsage(ctx, true);
+	});
+
 	pi.on("session_shutdown", (event) => {
 		// The overlay belongs to the terminal, not to one conversation. Keep it
 		// alive across new/resume/fork so the next session_start can reseed it.

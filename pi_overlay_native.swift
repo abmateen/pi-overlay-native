@@ -298,6 +298,11 @@ final class FooterView: NSView {
     /// True when the rate is our char-count estimate rather than usage reported
     /// by the provider. It reads as `≈ 12 tok/s` so the two are not confused.
     var rateIsEstimated = false
+    /// The active tab's last compaction. The usage number is already the
+    /// post-compaction estimate, so the amount freed is drawn next to it; without it
+    /// the meter looks like it dropped by itself.
+    var compactedFrom: Int?
+    var compactedTo: Int?
 
     private static let font = Theme.mono(11, .medium)
     private static let meterWidth: CGFloat = 56
@@ -306,7 +311,7 @@ final class FooterView: NSView {
 
     override var isFlipped: Bool { true }
 
-    private static func tokenCount(_ value: Int) -> String {
+    static func tokenCount(_ value: Int) -> String {
         if abs(value) < 1000 { return String(value) }
         let k = Double(value) / 1000.0
         return k < 10 ? String(format: "%.1fk", k) : String(format: "%.0fk", k)
@@ -354,13 +359,24 @@ final class FooterView: NSView {
         ]
         let contextString = contextText as NSString
         let rateString = rateText as NSString
+        let savedAttrs: [NSAttributedString.Key: Any] = [
+            .font: Self.font,
+            .foregroundColor: Theme.ok,
+        ]
+        var savedString: NSString?
+        var savedWidth: CGFloat = 0
+        if let from = compactedFrom, let to = compactedTo, from > to {
+            let text = ("↓" + Self.tokenCount(from - to)) as NSString
+            savedString = text
+            savedWidth = text.size(withAttributes: savedAttrs).width
+        }
         let contextWidth = contextString.size(withAttributes: neutral).width
         let rateWidth = rateString.size(withAttributes: rateAttrs).width
         let gap: CGFloat = 9
 
         // Drop the meter when the window is too narrow for meter + both texts.
         let showMeter = bounds.width >= Self.inset + Self.meterWidth + gap
-            + contextWidth + 18 + rateWidth + Self.inset
+            + contextWidth + (savedWidth > 0 ? gap + savedWidth : 0) + 18 + rateWidth + Self.inset
         let textTop = (height - (Self.font.ascender - Self.font.descender)) / 2
 
         var x = Self.inset
@@ -389,6 +405,10 @@ final class FooterView: NSView {
         }
 
         contextString.draw(at: NSPoint(x: x, y: textTop), withAttributes: neutral)
+        if let savedString,
+           x + contextWidth + gap + savedWidth + 18 <= bounds.width - Self.inset - rateWidth {
+            savedString.draw(at: NSPoint(x: x + contextWidth + gap, y: textTop), withAttributes: savedAttrs)
+        }
         rateString.draw(
             at: NSPoint(x: bounds.width - Self.inset - rateWidth, y: textTop),
             withAttributes: rateAttrs
@@ -553,6 +573,7 @@ struct PiCommand: Equatable {
     enum Action: Equatable {
         case setSessionName
         case reloadPi
+        case compactSession
     }
 
     let name: String
@@ -608,6 +629,13 @@ struct PiCommand: Equatable {
         description: "Restart the pi RPC process and reload extensions/skills",
         source: "builtin",
         action: .reloadPi
+    )
+
+    static let compact = PiCommand(
+        name: "compact",
+        description: "Summarise older context to free the context window",
+        source: "builtin",
+        action: .compactSession
     )
 }
 
@@ -3163,6 +3191,14 @@ final class RpcSession {
         _ = send(["type": "get_session_stats"])
     }
 
+    /// Manual compaction. `customInstructions` focuses the summary, same as
+    /// `/compact [instructions]` in the TUI.
+    func requestCompact(customInstructions: String?) {
+        var command: [String: Any] = ["type": "compact"]
+        if let customInstructions { command["customInstructions"] = customInstructions }
+        _ = send(command)
+    }
+
     func requestLastAssistantText() {
         _ = send(["type": "get_last_assistant_text"])
     }
@@ -3382,6 +3418,15 @@ final class RpcTab {
     var pendingSessionName: String?
     /// Set while /reload is restarting the RPC child.
     var reloadPending = false
+    /// Set while a compaction is running for this tab. Compaction makes its own
+    /// model call that can take far longer than a flash, so the status has to hold
+    /// until `compaction_end` rather than reverting after 1.4s.
+    var isCompacting = false
+    /// The last compaction's before/after counts, drawn in the footer. Compaction is
+    /// the only event that moves the meter without an answer, so the footer has to
+    /// show what the number came from.
+    var compactedBefore: Int?
+    var compactedAfter: Int?
     var assistantText = ""
     var streamingText = ""
     /// Thinking/reasoning for the current turn and the live stream.
@@ -4242,6 +4287,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 statusLabel.textColor = .systemRed
             } else if tab.session == nil {
                 statusLabel.stringValue = "NO PI SESSION"
+                statusLabel.textColor = .systemOrange
+            } else if tab.isCompacting {
+                // Held status: the summary is a model call, not a flash.
+                statusLabel.stringValue = "COMPACTING"
                 statusLabel.textColor = .systemOrange
             } else {
                 statusLabel.stringValue = "READY"
@@ -6649,6 +6698,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         statusLabel.textColor = .systemRed
                     }
                 }
+                // Compaction failures are reported by `compaction_end`, which also covers
+                // auto compaction; flashing here as well would double-print the status.
             } else {
                 switch command {
                 case "get_state":
@@ -6660,6 +6711,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     }
                     if let level = data?["thinkingLevel"] as? String {
                         tab.thinkingLevel = level
+                    }
+                    // A get_state reply reflects the live flag, so a tab switch or a
+                    // refresh while a summary is running still reads as COMPACTING.
+                    if let compacting = data?["isCompacting"] as? Bool {
+                        tab.isCompacting = compacting
+                        if isActive { showIdleStatus() }
                     }
                     if let file = data?["sessionFile"] as? String {
                         if tab.sessionFile != file {
@@ -6713,6 +6770,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         // show the resumed session's last answer instead.
                         tab.assistantText = ""
                         tab.streamingText = ""
+                        // A compaction belongs to the conversation just left, so the
+                        // footer's `↓` marker goes with it.
+                        tab.compactedBefore = nil
+                        tab.compactedAfter = nil
+                        tab.isCompacting = false
                         tab.latestAnswerText = ""
                         tab.thinkingText = ""
                         tab.streamingThinking = ""
@@ -6875,7 +6937,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
                 case "get_session_stats":
                     if let usage = data?["contextUsage"] as? [String: Any] {
-                        tab.contextTokens = intValue(usage["tokens"])
+                        // `tokens` is null straight after a compaction; keep the estimate the
+                        // `compact` result seeded instead of dropping the meter to `—` for
+                        // the next turn.
+                        if let tokens = intValue(usage["tokens"]) { tab.contextTokens = tokens }
                         if let window = intValue(usage["contextWindow"]), window > 0 {
                             tab.contextWindow = window
                         }
@@ -6928,6 +6993,51 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     break
                 }
             }
+
+        case "compaction_start":
+            // Covers both `/compact` and pi's own threshold/overflow compaction, which
+            // otherwise leave no trace in the overlay.
+            tab.isCompacting = true
+            if isActive {
+                showIdleStatus()
+                updateSendButton()
+            }
+
+        case "compaction_end":
+            tab.isCompacting = false
+            let reason = record["reason"] as? String
+            let result = record["result"] as? [String: Any]
+            debugLog(
+                "compaction tab=\(tabTitle(tab)) reason=\(reason ?? "?") "
+                    + "before=\(intValue(result?["tokensBefore"]) ?? -1) "
+                    + "after=\(intValue(result?["estimatedTokensAfter"]) ?? -1) "
+                    + "aborted=\(record["aborted"] as? Bool == true)"
+            )
+            guard isActive else { break }
+            if let result {
+                // `contextUsage.tokens` is null until the next assistant response, so the
+                // meter is seeded from the post-compaction estimate instead of reading `—`
+                // right after the work that just freed the window.
+                let after = intValue(result["estimatedTokensAfter"])
+                if let after, after > 0 { tab.contextTokens = after }
+                tab.compactedBefore = intValue(result["tokensBefore"])
+                tab.compactedAfter = after
+                flashStatus(
+                    compactionMessage(
+                        before: tab.compactedBefore,
+                        after: after,
+                        reason: reason
+                    ),
+                    tone: .ok
+                )
+            } else if record["aborted"] as? Bool == true {
+                flashStatus("COMPACT CANCELLED", tone: .warn)
+            } else {
+                flashStatus("COMPACT ERROR", tone: .bad)
+            }
+            updateFooter()
+            // The send pill goes back to Send now that a prompt is allowed again.
+            updateSendButton()
 
         case "extension_ui_request":
             handleRpcExtensionRequest(record, tabID: tabID)
@@ -7500,6 +7610,15 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             eventTokensPerSecond = doubleValue(event["tokensPerSecond"])
             eventEstimatedTokensPerSecond = doubleValue(event["estimatedTokensPerSecond"])
 
+        case "compact":
+            // tty mode cannot run compaction: the terminal did it. The event carries the
+            // pre-compaction count only, so the meter waits for the next usage event.
+            let before = intValue(event["tokensBefore"])
+            if let before {
+                flashStatus(compactionMessage(before: before, after: nil), tone: .ok)
+            }
+            updateFooter()
+
         default:
             break
         }
@@ -7570,6 +7689,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             ? (tab?.estimatedTokensPerSecond ?? eventEstimatedTokensPerSecond)
             : nil
         let rate = estimated ?? tab?.tokensPerSecond ?? eventTokensPerSecond
+        let compactedFrom = tab?.compactedBefore
+        let compactedTo = tab?.compactedAfter
 
         let signature = [
             tokens.map { String($0) } ?? "-",
@@ -7577,6 +7698,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             rate.map { String(format: "%.1f", $0) } ?? "-",
             streaming ? "live" : "idle",
             estimated != nil ? "approx" : "exact",
+            compactedFrom.map { String($0) } ?? "-",
+            compactedTo.map { String($0) } ?? "-",
         ].joined(separator: "|")
         guard signature != footerSignature else { return }
         footerSignature = signature
@@ -7586,10 +7709,15 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         footerView.tokensPerSecond = rate
         footerView.isStreaming = streaming
         footerView.rateIsEstimated = estimated != nil
+        footerView.compactedFrom = compactedFrom
+        footerView.compactedTo = compactedTo
 
         var tip = "Context usage and output token rate"
         if let tokens, let window, window > 0 {
             tip += " — \(tokens) of \(window) tokens (\(Int((Double(tokens) / Double(window)) * 100))%)"
+        }
+        if let compactedFrom, let compactedTo, compactedFrom > compactedTo {
+            tip += " · last compaction \(compactedFrom) → \(compactedTo) tokens"
         }
         if let rate {
             tip += " · \(String(format: "%.1f", rate)) tokens/s"
@@ -7849,6 +7977,62 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         return true
     }
 
+    // MARK: - Compaction (/compact)
+
+    /// `/compact` in self mode. In tty mode the line is typed into the terminal and
+    /// pi's TUI handles it, so only the mirror path exists there.
+    private func handleCompactCommand(_ text: String) -> Bool {
+        guard mode == .selfHost else { return false }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed == "/compact" || trimmed.hasPrefix("/compact ") else { return false }
+
+        let instructions = String(trimmed.dropFirst("/compact".count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        keyTape.setText("")
+        rawText = ""
+        tape.removeAll()
+        compactActiveSession(instructions: instructions.isEmpty ? nil : instructions)
+        return true
+    }
+
+    private func compactActiveSession(instructions: String?) {
+        guard mode == .selfHost,
+              let tab = activeRpcTab,
+              let session = tab.session, session.isRunning else {
+            flashStatus("NO PI SESSION", tone: .bad)
+            return
+        }
+        guard !tab.isCompacting else {
+            flashStatus("ALREADY COMPACTING", tone: .warn)
+            return
+        }
+        // pi aborts the current turn before summarising, so a run in flight is dropped;
+        // that is worth seeing in the log rather than silently cancelling.
+        if tab.status == .processing {
+            debugLog("compact aborts the running turn tab=\(tabTitle(tab))")
+        }
+        // Compaction makes its own model call, so the status reads as work in
+        // progress for the whole summary, not as a 1.4s flash.
+        tab.isCompacting = true
+        showIdleStatus()
+        updateSendButton()
+        debugLog(
+            "compact request tab=\(tabTitle(tab)) "
+                + "instructions=\(instructions ?? "-")"
+        )
+        session.requestCompact(customInstructions: instructions)
+    }
+
+    private func compactionMessage(before: Int?, after: Int?, reason: String? = nil) -> String {
+        // Auto compaction is worth naming: the user did not ask for it.
+        let label = (reason == "threshold" || reason == "overflow") ? "AUTO COMPACTED" : "COMPACTED"
+        if let before, let after {
+            return "\(label) \(FooterView.tokenCount(before)) → \(FooterView.tokenCount(after))"
+        }
+        if let before { return "\(label) \(FooterView.tokenCount(before))" }
+        return label
+    }
+
     private func reloadActivePiProcess() {
         guard mode == .selfHost,
               let tab = activeRpcTab,
@@ -7860,7 +8044,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             flashStatus("NO PI SESSION", tone: .bad)
             return
         }
-        guard !session.isStreaming, tab.status != .processing else {
+        guard !session.isStreaming, tab.status != .processing, !tab.isCompacting else {
             flashStatus("BUSY — CANNOT RELOAD", tone: .warn)
             return
         }
@@ -7980,6 +8164,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         if query.isEmpty || "reload".hasPrefix(query) {
             candidates.append(.reload)
         }
+        if query.isEmpty || "compact".hasPrefix(query) {
+            candidates.append(.compact)
+        }
 
         guard !candidates.isEmpty else {
             hideCommandPalette()
@@ -8049,6 +8236,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             sendPrompt()
             return
         }
+        if command.action == .compactSession {
+            // Run the RPC `compact` command rather than sending the typed text: in RPC
+            // mode a prompt that starts with `/compact` goes to the model as text,
+            // because slash commands are executed by the TUI, not by the prompt path.
+            keyTape.setText("")
+            rawText = ""
+            tape.removeAll()
+            compactActiveSession(instructions: nil)
+            return
+        }
 
         if token == command.name.lowercased() {
             // The user already typed the exact command; execute it.
@@ -8098,6 +8295,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private var isProcessingActive: Bool {
         if mode == .selfHost, let tab = activeRpcTab {
             if tab.status == .processing { return true }
+            // Compaction is its own model call, so the pill has to read as busy while a
+            // summary is being written; otherwise Return queues a prompt into the middle
+            // of it and pi aborts the summary.
+            if tab.isCompacting { return true }
             if let session = tab.session, session.isStreaming { return true }
         }
         return keyTape.agentStatus == .processing
@@ -8127,7 +8328,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         switch mode {
         case .selfHost:
             guard let tab = activeRpcTab, let session = tab.session else { return }
-            guard tab.status == .processing || session.isStreaming else { return }
+            guard tab.status == .processing || session.isStreaming || tab.isCompacting else { return }
+            // During a summary this is the only way out: pi's abort stops the
+            // compaction and `compaction_end` reports it as aborted.
             session.abort()
             statusLabel.stringValue = "CANCELLING…"
             statusLabel.textColor = .systemOrange
@@ -9120,6 +9323,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         tab.contextTokens = 60124
         tab.contextWindow = 200000
         tab.tokensPerSecond = 14.2
+        // Seed a compaction result so the footer's `↓` marker is exercised too.
+        tab.compactedBefore = 118000
+        tab.compactedAfter = 60124
         // Seed the streamed estimate too, otherwise the processing preview shows
         // the reported rate and never exercises the `≈` path.
         tab.estimatedTokensPerSecond = 11.3
@@ -9514,6 +9720,14 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
         if handleSessionNameCommand(chunk) { return }
         if handleReloadCommand(chunk) { return }
+        if handleCompactCommand(chunk) { return }
+
+        // The command handlers above still run while compacting, but nothing else may
+        // be sent: pi would abort the summary to take the prompt.
+        if mode == .selfHost, let tab = activeRpcTab, tab.isCompacting {
+            flashStatus("COMPACTING — CANNOT SEND", tone: .warn)
+            return
+        }
 
         var sentOk = true
         if isSelfMode {
