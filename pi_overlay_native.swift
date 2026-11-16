@@ -3698,9 +3698,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             )
         )
         let initialTabExtra: CGFloat = mode == .selfHost ? Theme.tabStripHeight : 0
+        // Open centred on the visible frame. `visibleFrame` already excludes the
+        // menu bar and Dock, and the `max` keeps a 12 pt gap at the bottom on
+        // screens too short for a centred window.
         let origin = NSPoint(
             x: max(20, visible.midX - size.width / 2),
-            y: visible.minY + 12
+            y: max(visible.minY + 12, visible.midY - size.height / 2)
         )
 
         window = OverlayWindow(
@@ -3721,8 +3724,27 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             ? "pi · \(initialDirectory.lastPathComponent)"
             : "pi-overlay-native · \(ttyPath ?? "dry")"
 
-        // Remember the size/position the user drags out.
-        window.setFrameAutosaveName("PiOverlayWindow")
+        // Remember the size/position the user drags out. A preview run resizes the
+        // window to render a PNG, so it must not persist that geometry over the
+        // user's real frame.
+        let isPreview = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW"] != nil
+        if !isPreview {
+            window.setFrameAutosaveName("PiOverlayWindow")
+        }
+        // One-time migration: earlier builds pinned the window 12 pt above the
+        // bottom of the screen. A saved frame that is still exactly that anchor
+        // means the user never moved the window, so re-centre it rather than
+        // keeping the old position forever; a dragged frame is left alone.
+        if !isPreview, let screen = window.screen ?? NSScreen.main {
+            let visible = screen.visibleFrame
+            var frame = window.frame
+            if abs(frame.minY - (visible.minY + 12)) <= 1,
+               abs(frame.midX - visible.midX) <= 1,
+               frame.height < visible.height - 1 {
+                frame.origin.y = visible.midY - frame.height / 2
+                window.setFrame(frame, display: false)
+            }
+        }
         debugLog("window frame=\(NSStringFromRect(window.frame)) screen=\(NSStringFromRect((window.screen ?? NSScreen.main)?.visibleFrame ?? .zero))")
         if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
             var restored = window.frame
@@ -3732,7 +3754,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         // If a previous run quit while the window filled the screen, start from
-        // the default bottom-anchored frame instead of a screen-sized overlay.
+        // the default centred frame instead of a screen-sized overlay.
         if let screen = window.screen ?? NSScreen.main {
             let visible = screen.visibleFrame
             if window.frame.width >= visible.width - 1,
@@ -3745,7 +3767,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 window.setFrame(
                     NSRect(
                         x: visible.midX - width / 2,
-                        y: visible.minY + 12,
+                        y: max(visible.minY + 12, visible.midY - height / 2),
                         width: width,
                         height: height
                     ),
