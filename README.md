@@ -15,7 +15,9 @@ The window is a light rounded card with a dark input area and a purple accent.
 The top bar holds the profile pill, tabs, **＋**, and an icon cluster on the
 right (terminal diagnostics, Response panel, hide, collapse, close). Under it
 sit the status pill, folder/model dropdowns and the pi/ssh PID chip, then the
-Sessions row and the large prompt card.
+Sessions row and the large prompt card. A thin strip along the bottom edge shows
+the context window usage and the output token rate (see
+[Footer](#footer-context-usage-and-token-rate)).
 
 ```text
 [👤 daily ▾] [ ✓ pi-overlay-native × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ▯  ⌄  ×
@@ -26,6 +28,9 @@ READY  │  [📁 pi-overlay-native ▾]  [DeepSeek V4.1 Flash ▾]  [pi 42165]
 │  🎤  🖼  📎                                              ⌘ ↵ Send   ✓ Done │
 └────────────────────────────────────────────────────────────────────────┘
  ▸ Response  │  [Latest answer ▾]  💡                           ⧉   ⤓   ⤢
+ ▤ answer panel…
+──────────────────────────────────────────────────────────────────────────
+▮▮░░░░░  60.1k / 200k                                           14.2 tok/s
 ```
 
 In tty mode the label row shows the target terminal and window title instead of
@@ -131,6 +136,7 @@ move it.
 | **💡 (thinking)** | Show/hide visible reasoning for the current answer; streams live while the turn is generating |
 | **Ctrl+C / Cmd+C in Response** | Copy the selected text from the rendered answer; with no selection, copy the whole response (including thinking when enabled) |
 | **Response icons** | Copy the answer (with thinking when enabled), save it as Markdown, or expand/collapse the panel |
+| **Footer strip** | Context window usage (current / total) and the output token rate; hover for the exact numbers and percentage |
 | **Notification click** | Brings the overlay back on the tab whose turn finished |
 | **Cmd + M** | Same as **▾ / ▴** |
 | **Drag edge or corner** | Resize the overlay; the size is remembered (the Response panel takes extra height while open) |
@@ -138,6 +144,24 @@ move it.
 
 The overlay receives keys only while it has focus; there is no separate capture
 toggle. It is not a global keylogger.
+
+### Footer (context usage and token rate)
+
+The bottom strip shows two numbers for the active tab:
+
+- **context usage** — the current context estimate over the model's context
+  window, e.g. `60.1k / 200k`, with a small meter that turns amber past 70% and
+  red past 85%;
+- **token rate** — output tokens per second for the turn that is generating, or
+  for the last one while idle. It reads in the accent colour while streaming and
+  in the secondary colour once the turn has settled.
+
+The numbers come from pi: `get_session_stats` (`contextUsage.tokens` /
+`contextWindow`) and the `usage` record on each assistant message. In tty mode
+the extension sends them as `usage` events, throttled to one line every 400 ms
+so a long streamed answer does not flood the pipe. Hover the strip for the exact
+token counts, percentage, and rate. The strip is hidden in compact mode and when
+the overlay is collapsed to the top bar.
 
 ### Slash commands
 
@@ -278,6 +302,10 @@ The extension:
 - sends `{"type":"status","value":"processing"|"done"}` on agent lifecycle,
 - sends the final assistant text as `{"type":"response","text":"..."}`,
 - sends the session's prompt/answer pairs as `{"type":"queries","items":[...]}`,
+- sends the footer numbers as `{"type":"usage","contextTokens":60124,`
+  `"contextWindow":200000,"tokensPerSecond":14.2}` — pi's own context estimate
+  (`getContextUsage()`) plus the output token rate for the streaming turn,
+  throttled to one line every 400 ms,
 - seeds the response panel and prompt-history dropdown from the current session
   when the overlay starts or the session changes,
 - keeps the overlay running when you switch conversations (only `quit` and
@@ -318,6 +346,10 @@ child's JSONL event stream from stdout:
 - `agent_start` → **Processing**
 - `agent_settled` → **Done** + final Markdown response
 - `message_end` → authoritative assistant text
+- `message_start` / `message_update` / `message_end` `usage` → output token rate
+  and the running context estimate for the footer strip
+- `get_session_stats` → `contextUsage` (`tokens` / `contextWindow`) for the
+  footer strip, refreshed after each settled turn
 - `get_entries` → active-branch prompt/answer pairs for the prompt-history dropdown
 - `extension_ui_request` → confirm / select / input / editor dialogs
 - `response(success: false)` → error status

@@ -12,6 +12,13 @@ let overlay: ChildProcess | null = null;
 let overlayTty: string | null = null;
 let lastAssistantText = "";
 
+// Footer numbers (context usage + token rate), sent to the overlay as `usage`.
+const USAGE_THROTTLE_MS = 400;
+let usageTimer: ReturnType<typeof setTimeout> | null = null;
+let lastUsageSentAt = 0;
+let messageStartedAt = 0;
+let lastTokensPerSecond: number | null = null;
+
 function currentTTY(): string | null {
 	try {
 		const tty = execFileSync(
@@ -139,6 +146,58 @@ function queueQueries(ctx: ExtensionContext): void {
 	setTimeout(() => sendQueries(ctx), 0);
 }
 
+/**
+ * Footer numbers for the overlay: current context window usage and the output
+ * token rate for the turn that is streaming (or the last one while idle).
+ * `getContextUsage()` is pi's own estimate, the same one its terminal footer
+ * and `/session` use.
+ */
+function sendUsage(ctx: ExtensionContext, force: boolean): void {
+	if (usageTimer) {
+		if (!force) return;
+		clearTimeout(usageTimer);
+		usageTimer = null;
+	}
+
+	const wait = USAGE_THROTTLE_MS - (Date.now() - lastUsageSentAt);
+	if (!force && wait > 0) {
+		// Keep the streamed numbers moving without writing one line per token.
+		usageTimer = setTimeout(() => {
+			usageTimer = null;
+			sendUsage(ctx, true);
+		}, wait);
+		return;
+	}
+
+	lastUsageSentAt = Date.now();
+	const usage = ctx.getContextUsage();
+	sendEvent({
+		type: "usage",
+		contextTokens: usage?.tokens ?? null,
+		contextWindow: usage?.contextWindow ?? 0,
+		tokensPerSecond: lastTokensPerSecond,
+	});
+}
+
+/** Output tokens / seconds for the assistant message that is streaming. */
+function trackRate(message: unknown): void {
+	if (!message || typeof message !== "object") return;
+	if ((message as { role?: string }).role !== "assistant") return;
+
+	const usage = (message as { usage?: { output?: number } }).usage;
+	const output = usage?.output ?? 0;
+	if (output <= 0) return;
+
+	if (!messageStartedAt) messageStartedAt = Date.now();
+	const elapsed = (Date.now() - messageStartedAt) / 1000;
+	if (elapsed > 0.2) lastTokensPerSecond = output / elapsed;
+}
+
+function resetUsage(): void {
+	messageStartedAt = 0;
+	lastTokensPerSecond = null;
+}
+
 function killExisting(ttyPath: string): void {
 	try {
 		execFileSync("pkill", ["-f", `[t]ty_overlay_native .*--tty ${ttyPath}`], {
@@ -150,6 +209,10 @@ function killExisting(ttyPath: string): void {
 }
 
 function stopOverlay(): void {
+	if (usageTimer) {
+		clearTimeout(usageTimer);
+		usageTimer = null;
+	}
 	if (overlay && !overlay.killed) {
 		try {
 			overlay.kill("SIGTERM");
@@ -242,29 +305,58 @@ export default function (pi: ExtensionAPI) {
 		lastAssistantText = lastAssistantFromSession(ctx);
 		sendEvent({ type: "response", text: lastAssistantText });
 		sendQueries(ctx);
+		// A new conversation has its own context usage and token rate.
+		resetUsage();
+		sendUsage(ctx, true);
+	});
+
+	/** New assistant message: start the clock for the live token rate. */
+	pi.on("message_start", (event, ctx) => {
+		if ((event.message as { role?: string }).role === "assistant") {
+			messageStartedAt = Date.now();
+			lastTokensPerSecond = null;
+		}
+		sendUsage(ctx, false);
+	});
+
+	/** Streaming usage is cumulative for the response, so it also gives the rate. */
+	pi.on("message_update", (event, ctx) => {
+		trackRate(event.message);
+		sendUsage(ctx, false);
 	});
 
 	pi.on("message_end", (event, ctx) => {
 		if (event.message.role === "assistant") {
 			lastAssistantText = textFromContent(event.message.content);
+			trackRate(event.message);
 		}
 		// Show a new prompt in the dropdown as soon as it is persisted.
 		// Answers can wait for agent_settled, which sends a fresh list.
 		if (event.message.role === "user") {
 			queueQueries(ctx);
 		}
+		// The footer numbers come from the same usage record.
+		sendUsage(ctx, true);
 	});
 
-	pi.on("agent_start", () => {
+	pi.on("agent_start", (_event, ctx) => {
 		lastAssistantText = "";
+		resetUsage();
 		sendEvent({ type: "status", value: "processing" });
+		sendUsage(ctx, true);
 	});
 
 	pi.on("agent_settled", (_event, ctx) => {
 		sendEvent({ type: "status", value: "done" });
 		sendEvent({ type: "response", text: lastAssistantText });
 		sendQueries(ctx);
+		// pi's own estimate is the number that drives compaction, so refresh the
+		// footer from it once the turn has settled.
+		sendUsage(ctx, true);
 	});
+
+	// The context window belongs to the model, so a model change can move it.
+	pi.on("model_select", (_event, ctx) => sendUsage(ctx, true));
 
 	pi.on("session_shutdown", (event) => {
 		// The overlay belongs to the terminal, not to one conversation. Keep it

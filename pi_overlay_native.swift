@@ -74,6 +74,8 @@ enum Theme {
     static let fieldRadius: CGFloat = 9
     static let inputRadius: CGFloat = 16
     static let responseRadius: CGFloat = 12
+    /// Bottom strip that shows the context window usage and the token rate.
+    static let footerHeight: CGFloat = 26
 
     static func font(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
         NSFont.systemFont(ofSize: size, weight: weight)
@@ -274,6 +276,114 @@ final class PillCaption: NSTextField {
                 height: textSize.height
             ),
             withAttributes: attrs
+        )
+    }
+}
+
+/// Footer strip along the bottom edge: the context window (current/total) with
+/// a small usage meter, and the output token rate for the turn that is running
+/// — or for the last one while idle. The numbers come from pi: RPC
+/// `get_session_stats`, the `usage` on each assistant message, or the
+/// extension's `usage` event in tty mode.
+final class FooterView: NSView {
+    var contextTokens: Int?
+    var contextWindow: Int?
+    var tokensPerSecond: Double?
+    /// A live rate reads in the accent colour; a finished turn reads as history.
+    var isStreaming = false
+
+    private static let font = Theme.mono(11, .medium)
+    private static let meterWidth: CGFloat = 56
+    private static let meterHeight: CGFloat = 8
+    private static let inset: CGFloat = 16
+
+    override var isFlipped: Bool { true }
+
+    private static func tokenCount(_ value: Int) -> String {
+        if abs(value) < 1000 { return String(value) }
+        let k = Double(value) / 1000.0
+        return k < 10 ? String(format: "%.1fk", k) : String(format: "%.0fk", k)
+    }
+
+    private var contextText: String {
+        guard let window = contextWindow, window > 0 else { return "context —" }
+        guard let tokens = contextTokens else { return "— / \(Self.tokenCount(window))" }
+        return "\(Self.tokenCount(tokens)) / \(Self.tokenCount(window))"
+    }
+
+    private var rateText: String {
+        guard let rate = tokensPerSecond, rate > 0 else { return "— tok/s" }
+        return rate < 10 ? String(format: "%.1f tok/s", rate) : String(format: "%.0f tok/s", rate)
+    }
+
+    private var meterFraction: CGFloat {
+        guard let tokens = contextTokens, let window = contextWindow, window > 0 else { return 0 }
+        return min(1, max(0, CGFloat(tokens) / CGFloat(window)))
+    }
+
+    private var meterTone: NSColor {
+        let used = meterFraction
+        if used >= 0.85 { return Theme.bad }
+        if used >= 0.70 { return Theme.warn }
+        return Theme.accent
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let height = bounds.height
+        guard height > 12, bounds.width > 2 * Self.inset else { return }
+
+        Theme.border.setFill()
+        NSBezierPath(rect: NSRect(x: 0, y: 0, width: bounds.width, height: 1)).fill()
+
+        let neutral: [NSAttributedString.Key: Any] = [
+            .font: Self.font,
+            .foregroundColor: Theme.textSecondary,
+        ]
+        let rateColor = isStreaming ? Theme.accent : Theme.textSecondary
+        let rateAttrs: [NSAttributedString.Key: Any] = [
+            .font: Self.font,
+            .foregroundColor: rateColor,
+        ]
+        let contextString = contextText as NSString
+        let rateString = rateText as NSString
+        let contextWidth = contextString.size(withAttributes: neutral).width
+        let rateWidth = rateString.size(withAttributes: rateAttrs).width
+        let gap: CGFloat = 9
+
+        // Drop the meter when the window is too narrow for meter + both texts.
+        let showMeter = bounds.width >= Self.inset + Self.meterWidth + gap
+            + contextWidth + 18 + rateWidth + Self.inset
+        let textTop = (height - (Self.font.ascender - Self.font.descender)) / 2
+
+        var x = Self.inset
+        if showMeter {
+            let track = NSRect(
+                x: x,
+                y: (height - Self.meterHeight) / 2,
+                width: Self.meterWidth,
+                height: Self.meterHeight
+            )
+            Theme.fieldAlt.setFill()
+            Theme.rounded(track, Self.meterHeight / 2).fill()
+            if meterFraction > 0 {
+                meterTone.setFill()
+                Theme.rounded(
+                    NSRect(
+                        x: track.minX,
+                        y: track.minY,
+                        width: max(2, track.width * meterFraction),
+                        height: track.height
+                    ),
+                    Self.meterHeight / 2
+                ).fill()
+            }
+            x += Self.meterWidth + gap
+        }
+
+        contextString.draw(at: NSPoint(x: x, y: textTop), withAttributes: neutral)
+        rateString.draw(
+            at: NSPoint(x: bounds.width - Self.inset - rateWidth, y: textTop),
+            withAttributes: rateAttrs
         )
     }
 }
@@ -3040,6 +3150,11 @@ final class RpcSession {
         _ = send(["type": "get_state"])
     }
 
+    /// Token totals and the current context-window estimate for the footer.
+    func requestSessionStats() {
+        _ = send(["type": "get_session_stats"])
+    }
+
     func requestLastAssistantText() {
         _ = send(["type": "get_last_assistant_text"])
     }
@@ -3271,6 +3386,13 @@ final class RpcTab {
     var selectedQueryID: String?
     var rawText = ""
     var tape: [String] = []
+    /// Footer numbers: current context estimate, the model's context window,
+    /// and the output token rate for this tab's running or last turn.
+    var contextTokens: Int?
+    var contextWindow: Int?
+    var tokensPerSecond: Double?
+    /// Wall clock when this tab's assistant response started, for the live rate.
+    var responseStartedAt: Date?
 
     var isRemote: Bool { remoteHost != nil }
 
@@ -3346,6 +3468,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let thinkingButton: IconButton
     let commandPalette: CommandPaletteView
     let commandPalettePanel: CommandPalettePanel
+    let footerView: FooterView
 
     private var responseExpanded = false
     private var responseUserCollapsed = false
@@ -3364,6 +3487,15 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private var mcpCaptureUntil: Date?
     /// Local key monitor for copying selected text from the response WebView.
     private var responseCopyMonitor: Any?
+
+    /// Footer numbers for modes without per-tab state (tty/extension), which
+    /// come from the extension's `usage` event.
+    private var eventContextTokens: Int?
+    private var eventContextWindow: Int?
+    private var eventTokensPerSecond: Double?
+    /// Redraw the footer only when a displayed number actually changes, so a
+    /// streamed turn does not repaint it on every token.
+    private var footerSignature = ""
 
     private let speech = SpeechInput()
     private var voiceBase = ""
@@ -3446,7 +3578,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private var collapsedHeight: CGFloat { mode == .selfHost ? Theme.tabStripHeight : 44 }
 
     private var baseMinSize: NSSize {
-        NSSize(width: 720, height: mode == .selfHost ? 320 : 210)
+        NSSize(width: 720, height: (mode == .selfHost ? 320 : 210) + Theme.footerHeight)
     }
 
     /// Window height the overlay opens at: the default for a fresh launch and
@@ -3507,7 +3639,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         window.hasShadow = true
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isMovableByWindowBackground = true
-        window.minSize = NSSize(width: 720, height: mode == .selfHost ? 320 : 210)
+        window.minSize = NSSize(width: 720, height: (mode == .selfHost ? 320 : 210) + Theme.footerHeight)
         window.title = selfMode
             ? "pi · \(initialDirectory.lastPathComponent)"
             : "pi-overlay-native · \(ttyPath ?? "dry")"
@@ -3943,6 +4075,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         responseWebView.layer?.masksToBounds = true
         responseWebView.isHidden = true
         container.addSubview(responseWebView)
+
+        // Context usage + token rate, along the bottom edge under the panel.
+        footerView = FooterView(frame: .zero)
+        footerView.toolTip = "Context usage and output token rate"
+        container.addSubview(footerView)
 
         super.init()
 
@@ -5682,6 +5819,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         rebuildQueryMenu()
         updateResponseButton()
+        updateFooter()
         rebuildDirectoryMenu()
         rebuildTabBar()
         layoutViews()
@@ -5845,6 +5983,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             session.requestState()
             session.requestModels()
             session.requestCommands()
+            session.requestSessionStats()
             // Load the resumed session's last answer and prompt history so the
             // response panel and query dropdown are populated immediately.
             session.requestLastAssistantText()
@@ -6098,6 +6237,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tab.thinkingText = ""
             tab.streamingThinking = ""
             tab.lastError = nil
+            tab.responseStartedAt = nil
+            tab.tokensPerSecond = nil
             if isActive && tab.showThinking {
                 ensureThinkingPanelOpen(tab)
                 scheduleLiveResponseRender()
@@ -6105,6 +6246,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         case "agent_settled":
             tab.status = .done
+            session.requestSessionStats()
             if tab.assistantText.isEmpty,
                let lastError = tab.lastError,
                !lastError.isEmpty {
@@ -6134,7 +6276,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     + "thinking=\(tab.thinkingText.count) show=\(tab.showThinking)"
             )
 
+        case "message_start":
+            if (record["message"] as? [String: Any])?["role"] as? String == "assistant" {
+                tab.responseStartedAt = Date()
+                tab.tokensPerSecond = nil
+            }
+
         case "message_update":
+            if let usage = record["usage"] as? [String: Any] {
+                applyUsage(usage, tab: tab, isActive: isActive)
+            }
             if let update = record["assistantMessageEvent"] as? [String: Any] {
                 let updateType = update["type"] as? String
                 if updateType == "error",
@@ -6201,6 +6352,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         }
                     }
                 } else if role == "assistant" {
+                    if let usage = message["usage"] as? [String: Any] {
+                        applyUsage(usage, tab: tab, isActive: isActive)
+                    }
                     let thinking = RpcSession.messageThinking(from: message)
                     if !thinking.isEmpty {
                         tab.thinkingText = thinking
@@ -6360,6 +6514,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 case "get_state":
                     if let model = data?["model"] as? [String: Any] {
                         tab.currentModel = model
+                        if let window = intValue(model["contextWindow"]), window > 0 {
+                            tab.contextWindow = window
+                        }
                     }
                     if let file = data?["sessionFile"] as? String {
                         if tab.sessionFile != file {
@@ -6566,6 +6723,15 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         }
                     }
 
+                case "get_session_stats":
+                    if let usage = data?["contextUsage"] as? [String: Any] {
+                        tab.contextTokens = intValue(usage["tokens"])
+                        if let window = intValue(usage["contextWindow"]), window > 0 {
+                            tab.contextWindow = window
+                        }
+                    }
+                    if isActive { updateFooter() }
+
                 case "set_session_name":
                     if let pending = tab.pendingSessionName {
                         tab.sessionName = pending
@@ -6644,6 +6810,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         } else if tab.status != previousStatus {
             rebuildTabBar()
         }
+        updateFooter()
         updateStatusItem()
     }
 
@@ -7172,9 +7339,79 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             rebuildQueryMenu()
             applyQuerySelection(expand: false)
 
+        case "usage":
+            eventContextTokens = intValue(event["contextTokens"])
+            eventContextWindow = intValue(event["contextWindow"])
+            eventTokensPerSecond = doubleValue(event["tokensPerSecond"])
+
         default:
             break
         }
+
+        updateFooter()
+    }
+
+    // MARK: Footer numbers
+
+    private func intValue(_ value: Any?) -> Int? {
+        if let number = value as? Int { return number }
+        if let number = value as? Double { return Int(number) }
+        return nil
+    }
+
+    private func doubleValue(_ value: Any?) -> Double? {
+        if let number = value as? Double { return number }
+        if let number = value as? Int { return Double(number) }
+        return nil
+    }
+
+    /// Context estimate and live token rate from a provider usage record.
+    /// `totalTokens` is the same estimate pi uses for the context footer.
+    private func applyUsage(_ usage: [String: Any], tab: RpcTab, isActive: Bool) {
+        let input = intValue(usage["input"]) ?? 0
+        let output = intValue(usage["output"]) ?? 0
+        let cacheRead = intValue(usage["cacheRead"]) ?? 0
+        let cacheWrite = intValue(usage["cacheWrite"]) ?? 0
+        let total = intValue(usage["totalTokens"]) ?? (input + output + cacheRead + cacheWrite)
+        if total > 0 { tab.contextTokens = total }
+        if output > 0, let started = tab.responseStartedAt {
+            let elapsed = Date().timeIntervalSince(started)
+            if elapsed > 0.2 { tab.tokensPerSecond = Double(output) / elapsed }
+        }
+        if isActive { updateFooter() }
+    }
+
+    /// Per-tab numbers in RPC modes, controller-wide numbers in the tty modes.
+    private func updateFooter() {
+        let tab = activeRpcTab
+        let tokens = tab?.contextTokens ?? eventContextTokens
+        let window = tab?.contextWindow ?? eventContextWindow
+        let rate = tab?.tokensPerSecond ?? eventTokensPerSecond
+        let streaming = tab?.status == .processing || keyTape.agentStatus == .processing
+
+        let signature = [
+            tokens.map { String($0) } ?? "-",
+            window.map { String($0) } ?? "-",
+            rate.map { String(format: "%.1f", $0) } ?? "-",
+            streaming ? "live" : "idle",
+        ].joined(separator: "|")
+        guard signature != footerSignature else { return }
+        footerSignature = signature
+
+        footerView.contextTokens = tokens
+        footerView.contextWindow = window
+        footerView.tokensPerSecond = rate
+        footerView.isStreaming = streaming
+
+        var tip = "Context usage and output token rate"
+        if let tokens, let window, window > 0 {
+            tip += " — \(tokens) of \(window) tokens (\(Int((Double(tokens) / Double(window)) * 100))%)"
+        }
+        if let rate {
+            tip += " · \(String(format: "%.1f", rate)) tokens/s"
+        }
+        footerView.toolTip = tip
+        footerView.needsDisplay = true
     }
 
     private func updateResponseButton() {
@@ -8211,7 +8448,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             sessionPopup, newSessionButton, headerDivider,
             responseButton, responseDivider, queryPopup, thinkingButton, responseWebView,
             responseCopyButton, responseDownloadButton, responseExpandButton,
-            terminalButton, panelButton, hideButton, compactButton,
+            footerView, terminalButton, panelButton, hideButton, compactButton,
             minimizeButton, closeButton, topDivider,
         ]
         for view in hiddenViews { view.isHidden = true }
@@ -8331,7 +8568,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         // header contents go away. The window controls stay in the tab strip.
         let collapseHeader = isMinimized && mode == .selfHost
 
-        let textY: CGFloat = 10
+        let textY: CGFloat = Theme.footerHeight + 8
         let sessionRow = sessionRowExtra
         let responseVisible = responseExpanded && !isMinimized
         let headerRowHeight: CGFloat = 34
@@ -8580,9 +8817,20 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             responseWebView.isHidden = isMinimized || !responseExpanded
         }
 
+        // MARK: Footer (context usage + token rate)
+
+        footerView.isHidden = isMinimized
+        footerView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: width,
+            height: Theme.footerHeight
+        )
+
         window.invalidateCursorRects(for: container)
         updateResponseButton()
         updateSendButton()
+        updateFooter()
 
         if commandPalettePanel.isVisible {
             if isMinimized {
@@ -8658,6 +8906,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             answer: tab.latestAnswerText
         )]
         tab.rawText = ""
+        tab.contextTokens = 60124
+        tab.contextWindow = 200000
+        tab.tokensPerSecond = 14.2
         rpcTabs = [tab]
         activeRpcTabID = tab.id
         activeDirectory = tab.directory!
