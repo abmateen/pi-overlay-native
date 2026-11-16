@@ -6820,6 +6820,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     } else {
                         tab.assistantText = ""
                         tab.streamingText = ""
+                        // A compaction belongs to the conversation just left, so the
+                        // footer's `↓` marker goes with it.
+                        tab.compactedBefore = nil
+                        tab.compactedAfter = nil
+                        tab.isCompacting = false
                         tab.latestAnswerText = ""
                         tab.thinkingText = ""
                         tab.streamingThinking = ""
@@ -6834,6 +6839,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                         tab.pendingSessionName = nil
                         tab.reloadPending = false
                         tab.sessionFile = nil
+                        // pi starts a new session from the settings default model; the
+                        // selection made in the conversation just left is not carried
+                        // over. Re-apply it before the state refresh so the serial RPC
+                        // loop applies it before the get_state reply is built and the
+                        // menu and tab state reflect the session's actual model.
+                        if let model = tab.currentModel,
+                           let provider = model["provider"] as? String,
+                           let modelId = model["id"] as? String {
+                            session.setModel(provider: provider, modelId: modelId)
+                        }
                         session.requestState()
                         session.requestLastAssistantText()
                         session.requestEntries()
