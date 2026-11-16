@@ -14,14 +14,14 @@ in a directory you pick (`self` mode, the default when launched on its own).
 The window is a light rounded card with a dark input area and a purple accent.
 The top bar holds the profile pill, tabs, **＋**, and an icon cluster on the
 right (terminal diagnostics, Response panel, hide, collapse, close). Under it
-sit the status pill, folder/model dropdowns and the pi/ssh PID chip, then the
-Sessions row and the large prompt card. A thin strip along the bottom edge shows
-the context window usage and the output token rate (see
+sit the status pill, the folder, model and reasoning dropdowns, and the pi/ssh
+PID chip, then the Sessions row and the large prompt card. A thin strip along the
+bottom edge shows the context window usage and the output token rate (see
 [Footer](#footer-context-usage-and-token-rate)).
 
 ```text
 [👤 daily ▾] [ ✓ pi-overlay-native × ] [ ● /tmp × ] [ ✓ api-server × ]  ＋      >_  ▤  👁  ▯  ⌄  ×
-READY  │  [📁 pi-overlay-native ▾]  [DeepSeek V4.1 Flash ▾]  [pi 42165]
+READY  │  [📁 pi-overlay-native ▾]  [DeepSeek V4.1 ▾]  [🧠 high ▾]  [pi 42165]
 💬 Sessions  [fix markdown tables · Oct 24                    ▾]  ＋
 ┌────────────────────────────────────────────────────────────────────────┐
 │ type…                                                                  │
@@ -30,11 +30,11 @@ READY  │  [📁 pi-overlay-native ▾]  [DeepSeek V4.1 Flash ▾]  [pi 42165]
  ▸ Response  │  [Latest answer ▾]  💡                           ⧉   ⤓   ⤢
  ▤ answer panel…
 ──────────────────────────────────────────────────────────────────────────
-▮▮░░░░░  60.1k / 200k                                           14.2 tok/s
+▮▮░░░░░  60.1k / 200k                                         ≈ 14.2 tok/s
 ```
 
 In tty mode the label row shows the target terminal and window title instead of
-the folder/model controls.
+the folder/model controls, with the reasoning dropdown at its right end.
 
 ### Compact textbox mode
 
@@ -114,6 +114,7 @@ move it.
 | **Cmd + 1…9** | Jump to the 1st…9th tab |
 | **Model dropdown** | Switch the active tab's model without restarting pi |
 | **↻ model refresh** | Reload the available model list from pi (next to the model dropdown) |
+| **Reasoning dropdown** 🧠 | Set the thinking effort for the active tab's model; reads as a label when the model supports only `off` (see [Reasoning effort](#reasoning-effort)) |
 | **Sessions dropdown** | Resume a saved session from this folder in the active tab |
 | **Connect to Remote Host…** | Folder dropdown → run `pi --mode rpc` on another machine over SSH (see [Remote sessions](#remote-sessions-ssh)) |
 | **＋ next to Sessions** | Start a new conversation in the active tab (like `/new`) |
@@ -136,7 +137,7 @@ move it.
 | **💡 (thinking)** | Show/hide visible reasoning for the current answer; streams live while the turn is generating |
 | **Ctrl+C / Cmd+C in Response** | Copy the selected text from the rendered answer; with no selection, copy the whole response (including thinking when enabled) |
 | **Response icons** | Copy the answer (with thinking when enabled), save it as Markdown, or expand/collapse the panel |
-| **Footer strip** | Context window usage (current / total) and the output token rate; hover for the exact numbers and percentage |
+| **Footer strip** | Context window usage (current / total) and the output token rate — `≈` while streaming; hover for the exact numbers and percentage |
 | **Notification click** | Brings the overlay back on the tab whose turn finished |
 | **Cmd + M** | Same as **▾ / ▴** |
 | **Drag edge or corner** | Resize the overlay; the size is remembered (the Response panel takes extra height while open) |
@@ -156,12 +157,43 @@ The bottom strip shows two numbers for the active tab:
   for the last one while idle. It reads in the accent colour while streaming and
   in the secondary colour once the turn has settled.
 
+Providers only report `usage` in the final chunk of a stream, so mid-turn the
+rate is an **estimate** from the characters that have streamed (chars / 4 over the
+elapsed wall clock) and reads as `≈ 11 tok/s`. Once the turn ends the number is the
+provider's own usage for the whole turn, drawn without the `≈`. The first 200 ms of
+a turn shows no rate at all, since a rate over that little time is not readable.
+
 The numbers come from pi: `get_session_stats` (`contextUsage.tokens` /
 `contextWindow`) and the `usage` record on each assistant message. In tty mode
 the extension sends them as `usage` events, throttled to one line every 400 ms
 so a long streamed answer does not flood the pipe. Hover the strip for the exact
 token counts, percentage, and rate. The strip is hidden in compact mode and when
 the overlay is collapsed to the top bar.
+
+### Reasoning effort
+
+The 🧠 dropdown next to the model dropdown holds the thinking level for the
+active tab's model — `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`.
+Changing it does not restart pi.
+
+- **Self mode** — the list comes from `get_available_thinking_levels` and a
+  selection sends `set_thinking_level`. `get_state.thinkingLevel` seeds it, and
+  `thinking_level_changed` keeps it in step when pi changes the level by itself
+  (`/thinking` in the terminal, or a model whose default differs).
+- **tty mode** — the overlay has no command channel back into pi, so a selection
+  types `/thinking <level>` into the controlling TTY and the extension sends the
+  result back as a `thinking` event:
+  ```json
+  {"type":"thinking","level":"medium","levels":["off","low","medium","high"]}
+  ```
+  The level in that event is pi's *effective* level, not the one the overlay last
+  picked, because pi clamps it to the model.
+
+Levels are per model: `thinkingLevelMap` entries that are `null` are dropped, and
+a model that cannot reason lists only `off`. A single level leaves the control
+visible but disabled — a vanished control would read as a bug — and its tool tip
+says so. In a narrow window the control drops out rather than squeezing the model
+name, and it is hidden in compact mode.
 
 ### Slash commands
 
@@ -303,9 +335,15 @@ The extension:
 - sends the final assistant text as `{"type":"response","text":"..."}`,
 - sends the session's prompt/answer pairs as `{"type":"queries","items":[...]}`,
 - sends the footer numbers as `{"type":"usage","contextTokens":60124,`
-  `"contextWindow":200000,"tokensPerSecond":14.2}` — pi's own context estimate
-  (`getContextUsage()`) plus the output token rate for the streaming turn,
-  throttled to one line every 400 ms,
+  `"contextWindow":200000,"tokensPerSecond":14.2,`
+  `"estimatedTokensPerSecond":11.3}` — pi's own context estimate
+  (`getContextUsage()`) plus the output token rate for the streaming turn, either
+  reported usage or the char-count estimate used while the provider has not
+  reported any, throttled to one line every 400 ms,
+- sends the reasoning level as `{"type":"thinking","level":"medium",`
+  `"levels":["off","low","medium","high"]}` on session start, model change, and
+  level change, so the dropdown mirrors pi's effective level (see
+  [Reasoning effort](#reasoning-effort)),
 - seeds the response panel and prompt-history dropdown from the current session
   when the overlay starts or the session changes,
 - keeps the overlay running when you switch conversations (only `quit` and
@@ -348,6 +386,8 @@ child's JSONL event stream from stdout:
 - `message_end` → authoritative assistant text
 - `message_start` / `message_update` / `message_end` `usage` → output token rate
   and the running context estimate for the footer strip
+- `assistantMessageEvent` text/thinking deltas → the streamed char count the footer
+  shows as `≈` while usage is still zero
 - `get_session_stats` → `contextUsage` (`tokens` / `contextWindow`) for the
   footer strip, refreshed after each settled turn
 - `get_entries` → active-branch prompt/answer pairs for the prompt-history dropdown

@@ -18,6 +18,10 @@ let usageTimer: ReturnType<typeof setTimeout> | null = null;
 let lastUsageSentAt = 0;
 let messageStartedAt = 0;
 let lastTokensPerSecond: number | null = null;
+// Providers report usage in the final chunk, so during a turn the only rate that
+// can move is the estimate from the characters that have actually streamed.
+let streamedChars = 0;
+let lastEstimatedTokensPerSecond: number | null = null;
 
 function currentTTY(): string | null {
 	try {
@@ -138,6 +142,35 @@ function sendQueries(ctx: ExtensionContext): void {
 	sendEvent({ type: "queries", items: queriesFromSession(ctx) });
 }
 
+// pi's canonical level order; a model can only ever shrink this list.
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Mirror of pi's `getSupportedThinkingLevels()`: a `null` in the model's map means
+ * the model cannot express that level, an absent key means the default applies.
+ * A non-reasoning model supports `off` only, which is what makes the overlay's
+ * dropdown read as a label instead of a chooser.
+ */
+function thinkingLevels(ctx: ExtensionContext): string[] {
+	const model = ctx.model;
+	if (!model) return [...THINKING_LEVELS];
+	if (!model.reasoning) return ["off"];
+	const map = model.thinkingLevelMap as Record<string, string | null> | undefined;
+	if (!map) return [...THINKING_LEVELS];
+	return THINKING_LEVELS.filter((level) => map[level] !== null);
+}
+
+/**
+ * The reasoning dropdown. The overlay can only mirror this state: in tty mode it
+ * has no command channel back into pi, so a selection comes back as a typed
+ * `/thinking` command and this event closes the loop.
+ */
+function sendThinking(pi: ExtensionAPI, ctx: ExtensionContext): void {
+	// Ask for the effective level, not the one the overlay last picked: pi clamps it
+	// to the model, so the two can disagree.
+	sendEvent({ type: "thinking", level: pi.getThinkingLevel(), levels: thinkingLevels(ctx) });
+}
+
 /**
  * `message_end` fires before pi appends the message to the session, so defer
  * the read by a tick to include the prompt or answer that just finished.
@@ -176,7 +209,28 @@ function sendUsage(ctx: ExtensionContext, force: boolean): void {
 		contextTokens: usage?.tokens ?? null,
 		contextWindow: usage?.contextWindow ?? 0,
 		tokensPerSecond: lastTokensPerSecond,
+		estimatedTokensPerSecond: lastEstimatedTokensPerSecond,
 	});
+}
+
+/**
+ * Character counts, not a tokenizer: good enough to move the footer, not good
+ * enough to bill for. The footer draws an estimate as `≈` so it is not read as
+ * the provider's own usage.
+ */
+function noteStreamDelta(assistantMessageEvent: unknown): void {
+	const event = assistantMessageEvent as { type?: string; delta?: string };
+	if (event?.type !== "text_delta" && event?.type !== "thinking_delta") return;
+	if (typeof event.delta !== "string" || !messageStartedAt) return;
+
+	streamedChars += event.delta.length;
+	const elapsed = (Date.now() - messageStartedAt) / 1000;
+	if (elapsed <= 0.2) return;
+
+	const rate = streamedChars / 4 / elapsed;
+	// Only accept a move that changes the displayed digits.
+	if (rate.toFixed(1) === (lastEstimatedTokensPerSecond ?? -1).toFixed(1)) return;
+	lastEstimatedTokensPerSecond = rate;
 }
 
 /** Output tokens / seconds for the assistant message that is streaming. */
@@ -196,6 +250,8 @@ function trackRate(message: unknown): void {
 function resetUsage(): void {
 	messageStartedAt = 0;
 	lastTokensPerSecond = null;
+	streamedChars = 0;
+	lastEstimatedTokensPerSecond = null;
 }
 
 function killExisting(ttyPath: string): void {
@@ -308,6 +364,7 @@ export default function (pi: ExtensionAPI) {
 		// A new conversation has its own context usage and token rate.
 		resetUsage();
 		sendUsage(ctx, true);
+		sendThinking(pi, ctx);
 	});
 
 	/** New assistant message: start the clock for the live token rate. */
@@ -315,6 +372,9 @@ export default function (pi: ExtensionAPI) {
 		if ((event.message as { role?: string }).role === "assistant") {
 			messageStartedAt = Date.now();
 			lastTokensPerSecond = null;
+			// A new assistant message is a new rate window.
+			streamedChars = 0;
+			lastEstimatedTokensPerSecond = null;
 		}
 		sendUsage(ctx, false);
 	});
@@ -322,6 +382,7 @@ export default function (pi: ExtensionAPI) {
 	/** Streaming usage is cumulative for the response, so it also gives the rate. */
 	pi.on("message_update", (event, ctx) => {
 		trackRate(event.message);
+		noteStreamDelta(event.assistantMessageEvent);
 		sendUsage(ctx, false);
 	});
 
@@ -355,8 +416,13 @@ export default function (pi: ExtensionAPI) {
 		sendUsage(ctx, true);
 	});
 
-	// The context window belongs to the model, so a model change can move it.
-	pi.on("model_select", (_event, ctx) => sendUsage(ctx, true));
+	// The context window and the level list both belong to the model.
+	pi.on("model_select", (_event, ctx) => {
+		sendUsage(ctx, true);
+		sendThinking(pi, ctx);
+	});
+
+	pi.on("thinking_level_select", (_event, ctx) => sendThinking(pi, ctx));
 
 	pi.on("session_shutdown", (event) => {
 		// The overlay belongs to the terminal, not to one conversation. Keep it

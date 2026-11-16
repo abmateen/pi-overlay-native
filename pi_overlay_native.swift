@@ -77,6 +77,10 @@ enum Theme {
     /// Bottom strip that shows the context window usage and the token rate.
     static let footerHeight: CGFloat = 26
 
+    /// Reasoning-effort dropdown, sits next to the model dropdown.
+    static let thinkingPopupWidth: CGFloat = 106
+    static let thinkingTint = NSColor(calibratedRed: 0.45, green: 0.36, blue: 0.86, alpha: 1)
+
     static func font(_ size: CGFloat, _ weight: NSFont.Weight = .regular) -> NSFont {
         NSFont.systemFont(ofSize: size, weight: weight)
     }
@@ -291,6 +295,9 @@ final class FooterView: NSView {
     var tokensPerSecond: Double?
     /// A live rate reads in the accent colour; a finished turn reads as history.
     var isStreaming = false
+    /// True when the rate is our char-count estimate rather than usage reported
+    /// by the provider. It reads as `≈ 12 tok/s` so the two are not confused.
+    var rateIsEstimated = false
 
     private static let font = Theme.mono(11, .medium)
     private static let meterWidth: CGFloat = 56
@@ -313,7 +320,8 @@ final class FooterView: NSView {
 
     private var rateText: String {
         guard let rate = tokensPerSecond, rate > 0 else { return "— tok/s" }
-        return rate < 10 ? String(format: "%.1f tok/s", rate) : String(format: "%.0f tok/s", rate)
+        let number = rate < 10 ? String(format: "%.1f", rate) : String(format: "%.0f", rate)
+        return (rateIsEstimated ? "≈ " : "") + number + " tok/s"
     }
 
     private var meterFraction: CGFloat {
@@ -3197,6 +3205,14 @@ final class RpcSession {
         ])
     }
 
+    func requestThinkingLevels() {
+        _ = send(["type": "get_available_thinking_levels"])
+    }
+
+    func setThinkingLevel(_ level: String) {
+        _ = send(["type": "set_thinking_level", "level": level])
+    }
+
     @discardableResult
     func send(_ record: [String: Any]) -> Bool {
         guard isRunning,
@@ -3386,6 +3402,12 @@ final class RpcTab {
     var selectedQueryID: String?
     var rawText = ""
     var tape: [String] = []
+    /// Reasoning effort for this tab plus the levels the current model supports.
+    /// `["off"]` alone means the model cannot reason, which is what makes the
+    /// dropdown read as disabled rather than missing.
+    var thinkingLevel: String?
+    var thinkingLevels: [String] = []
+
     /// Footer numbers: current context estimate, the model's context window,
     /// and the output token rate for this tab's running or last turn.
     var contextTokens: Int?
@@ -3393,6 +3415,10 @@ final class RpcTab {
     var tokensPerSecond: Double?
     /// Wall clock when this tab's assistant response started, for the live rate.
     var responseStartedAt: Date?
+    /// Output streamed so far this turn. Providers only report usage in the final
+    /// chunk, so a live rate has to come from what has actually streamed.
+    var streamedChars = 0
+    var estimatedTokensPerSecond: Double?
 
     var isRemote: Bool { remoteHost != nil }
 
@@ -3428,6 +3454,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     let terminalTitleLabel: NSTextField
     let directoryPopup: NSPopUpButton
     let modelPopup: NSPopUpButton
+    let thinkingPopup: ThemedPopUpButton
     let modelRefreshButton: IconButton
     let pidLabel: NSTextField
     let tabBar: NSView
@@ -3493,6 +3520,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     private var eventContextTokens: Int?
     private var eventContextWindow: Int?
     private var eventTokensPerSecond: Double?
+    private var eventEstimatedTokensPerSecond: Double?
+    /// tty-mode reasoning level and its levels: the model's `thinkingLevelMap` is
+    /// only readable from inside pi, so these arrive on the extension's event.
+    private var eventThinkingLevel: String?
+    private var eventThinkingLevels: [String] = []
     /// Redraw the footer only when a displayed number actually changes, so a
     /// streamed turn does not repaint it on every token.
     private var footerSignature = ""
@@ -3765,6 +3797,23 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         modelPopup.isHidden = mode != .selfHost
         modelPopup.toolTip = "Model for this pi RPC session"
         container.addSubview(modelPopup)
+
+        // Reasoning-effort dropdown. Pi owns the level list; the overlay only
+        // mirrors it, so there is nothing to persist here.
+        let thinkingChoice = ThemedPopUpButton(
+            frame: NSRect(x: 446, y: size.height - initialTabExtra - 28, width: Theme.thinkingPopupWidth, height: 24),
+            pullsDown: false
+        )
+        thinkingChoice.symbolName = "brain"
+        thinkingChoice.symbolTint = Theme.thinkingTint
+        thinkingChoice.titleFont = Theme.font(12, .medium)
+        thinkingPopup = thinkingChoice
+        thinkingPopup.controlSize = .regular
+        thinkingPopup.addItem(withTitle: "Reasoning…")
+        thinkingPopup.isEnabled = false
+        thinkingPopup.isHidden = !(mode == .selfHost || mode == .tty)
+        thinkingPopup.toolTip = "Reasoning effort for this model"
+        container.addSubview(thinkingPopup)
 
         modelRefreshButton = IconButton(
             symbol: "arrow.clockwise",
@@ -4150,6 +4199,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         queryPopup.action = #selector(querySelected(_:))
         modelRefreshButton.target = self
         modelRefreshButton.action = #selector(refreshModels)
+        thinkingPopup.target = self
+        thinkingPopup.action = #selector(thinkingLevelSelected(_:))
         thinkingButton.target = self
         thinkingButton.action = #selector(toggleThinking)
         newTabButton.target = self
@@ -5278,6 +5329,75 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         debugLog("model menu key=\(key) models=\(models.count) current=\(modelDisplayName(current)) items=\(modelPopup.numberOfItems) selected=\(modelPopup.titleOfSelectedItem ?? "nil")")
     }
 
+    // MARK: - Reasoning effort
+
+    /// Rebuilds the reasoning-effort dropdown. Pi owns the level list: RPC answers
+    /// `get_available_thinking_levels`, and in tty mode the levels arrive on the
+    /// extension's `thinking` event because the overlay cannot read the model's
+    /// `thinkingLevelMap` itself. A model that cannot reason reports only `off`, so
+    /// the control stays visible but disabled instead of disappearing when the model
+    /// changes — a control that vanishes reads as a bug.
+    private func rebuildThinkingMenu() {
+        let levels = isSelfMode ? (activeRpcTab?.thinkingLevels ?? []) : eventThinkingLevels
+        let current = isSelfMode ? activeRpcTab?.thinkingLevel : eventThinkingLevel
+
+        thinkingPopup.removeAllItems()
+        guard !levels.isEmpty else {
+            thinkingPopup.addItem(withTitle: "Reasoning…")
+            thinkingPopup.isEnabled = false
+            thinkingPopup.toolTip = "No reasoning levels reported for this model"
+            return
+        }
+
+        var selected = 0
+        for (index, level) in levels.enumerated() {
+            thinkingPopup.addItem(withTitle: level)
+            thinkingPopup.item(at: index)?.representedObject = level
+            if level == current { selected = index }
+        }
+        thinkingPopup.selectItem(at: selected)
+        // One level means there is nothing to choose, so it reads as a label.
+        thinkingPopup.isEnabled = levels.count > 1
+        thinkingPopup.toolTip = levels.count > 1
+            ? "Reasoning effort for this model (pi's /thinking)"
+            : "This model supports only \(levels.first ?? "off")"
+    }
+
+    @objc private func thinkingLevelSelected(_ sender: NSMenuItem) {
+        guard let level = sender.representedObject as? String else { return }
+
+        if isSelfMode {
+            guard let tab = activeRpcTab, let session = tab.session, session.isRunning else {
+                flashStatus("NO PI SESSION", tone: .bad)
+                return
+            }
+            tab.thinkingLevel = level
+            rebuildThinkingMenu()
+            session.setThinkingLevel(level)
+            flashStatus("REASONING \(level)", tone: .ok)
+        } else {
+            // tty mode has no command channel back into pi, so the level moves only
+            // by typing pi's own slash command into the terminal.
+            guard injectSlashCommand("/thinking \(level)") else {
+                flashStatus("CANNOT SET REASONING", tone: .bad)
+                return
+            }
+            eventThinkingLevel = level
+            rebuildThinkingMenu()
+            flashStatus("REASONING \(level)", tone: .ok)
+        }
+        focusOverlay()
+    }
+
+    /// Types a slash command into the attached terminal. Needs the overlay to share
+    /// the controlling TTY, same requirement as the prompt path.
+    private func injectSlashCommand(_ command: String) -> Bool {
+        guard mode == .tty, let tty = ttyPath, tty == controllingTTY(), let injector else {
+            return false
+        }
+        return injector.inject(command + "\r")
+    }
+
     @objc private func modelSelected(_ sender: NSMenuItem) {
         guard let ref = sender.representedObject as? ModelRef,
               let tab = activeRpcTab,
@@ -5287,6 +5407,10 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         statusLabel.stringValue = "SWITCHING MODEL"
         statusLabel.textColor = .systemOrange
         session.setModel(provider: ref.provider, modelId: ref.modelId)
+        // Levels are per model and pi clamps the current one to the new model, so
+        // both numbers have to be re-read after a switch.
+        session.requestState()
+        session.requestThinkingLevels()
         focusOverlay()
     }
 
@@ -5798,6 +5922,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         rebuildModelMenu()
+        rebuildThinkingMenu()
         refreshSessionRow()
 
         if tab.isLaunching {
@@ -5982,6 +6107,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tab.isLaunching = false
             session.requestState()
             session.requestModels()
+            session.requestThinkingLevels()
             session.requestCommands()
             session.requestSessionStats()
             // Load the resumed session's last answer and prompt history so the
@@ -6230,6 +6356,14 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
 
         switch type {
+        case "thinking_level_changed":
+            // pi clamps the level to the model, so the value that comes back is the
+            // one to show even when the overlay asked for a different one.
+            if let level = record["level"] as? String {
+                tab.thinkingLevel = level
+                if isActive { rebuildThinkingMenu() }
+            }
+
         case "agent_start":
             tab.status = .processing
             tab.assistantText = ""
@@ -6239,6 +6373,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             tab.lastError = nil
             tab.responseStartedAt = nil
             tab.tokensPerSecond = nil
+            tab.streamedChars = 0
+            tab.estimatedTokensPerSecond = nil
             if isActive && tab.showThinking {
                 ensureThinkingPanelOpen(tab)
                 scheduleLiveResponseRender()
@@ -6280,6 +6416,8 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             if (record["message"] as? [String: Any])?["role"] as? String == "assistant" {
                 tab.responseStartedAt = Date()
                 tab.tokensPerSecond = nil
+                tab.streamedChars = 0
+                tab.estimatedTokensPerSecond = nil
             }
 
         case "message_update":
@@ -6303,6 +6441,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 } else if updateType == "thinking_delta",
                           let delta = update["delta"] as? String {
                     tab.streamingThinking += delta
+                    noteStreamDelta(delta, tab: tab, isActive: isActive)
                     if isActive && tab.showThinking {
                         ensureThinkingPanelOpen(tab)
                         scheduleLiveResponseRender()
@@ -6317,6 +6456,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 } else if updateType == "text_delta",
                           let delta = update["delta"] as? String {
                     tab.streamingText += delta
+                    noteStreamDelta(delta, tab: tab, isActive: isActive)
                     if isActive && tab.showThinking {
                         scheduleLiveResponseRender()
                     }
@@ -6518,6 +6658,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                             tab.contextWindow = window
                         }
                     }
+                    if let level = data?["thinkingLevel"] as? String {
+                        tab.thinkingLevel = level
+                    }
                     if let file = data?["sessionFile"] as? String {
                         if tab.sessionFile != file {
                             tab.sessionFile = file
@@ -6543,6 +6686,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                     }
                     if isActive {
                         rebuildModelMenu()
+                        rebuildThinkingMenu()
                         rebuildSessionMenu()
                     }
                     if tab.reloadPending {
@@ -6721,6 +6865,12 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                                 flashStatus("MODELS REFRESHED", tone: .ok)
                             }
                         }
+                    }
+
+                case "get_available_thinking_levels":
+                    if let levels = data?["levels"] as? [String] {
+                        tab.thinkingLevels = levels
+                        if isActive { rebuildThinkingMenu() }
                     }
 
                 case "get_session_stats":
@@ -7339,10 +7489,16 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             rebuildQueryMenu()
             applyQuerySelection(expand: false)
 
+        case "thinking":
+            eventThinkingLevel = event["level"] as? String
+            eventThinkingLevels = (event["levels"] as? [String]) ?? []
+            rebuildThinkingMenu()
+
         case "usage":
             eventContextTokens = intValue(event["contextTokens"])
             eventContextWindow = intValue(event["contextWindow"])
             eventTokensPerSecond = doubleValue(event["tokensPerSecond"])
+            eventEstimatedTokensPerSecond = doubleValue(event["estimatedTokensPerSecond"])
 
         default:
             break
@@ -7367,6 +7523,26 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
     /// Context estimate and live token rate from a provider usage record.
     /// `totalTokens` is the same estimate pi uses for the context footer.
+    /// Rough chars-per-token for the streamed estimate: good enough to move the
+    /// footer, not good enough to bill for. Providers report usage only in the
+    /// final chunk, so during a turn this is the only number that can move.
+    private static let charsPerToken = 4.0
+
+    private func noteStreamDelta(_ delta: String, tab: RpcTab, isActive: Bool) {
+        guard tab.responseStartedAt != nil else { return }
+        tab.streamedChars += delta.count
+        guard let started = tab.responseStartedAt else { return }
+        let elapsed = Date().timeIntervalSince(started)
+        guard elapsed > 0.2 else { return }
+        let rate = Double(tab.streamedChars) / Self.charsPerToken / elapsed
+        // Only accept a move that changes the displayed digits, so a streamed
+        // turn does not repaint the footer on every delta.
+        guard String(format: "%.1f", rate)
+            != String(format: "%.1f", tab.estimatedTokensPerSecond ?? -1) else { return }
+        tab.estimatedTokensPerSecond = rate
+        if isActive { updateFooter() }
+    }
+
     private func applyUsage(_ usage: [String: Any], tab: RpcTab, isActive: Bool) {
         let input = intValue(usage["input"]) ?? 0
         let output = intValue(usage["output"]) ?? 0
@@ -7386,14 +7562,21 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         let tab = activeRpcTab
         let tokens = tab?.contextTokens ?? eventContextTokens
         let window = tab?.contextWindow ?? eventContextWindow
-        let rate = tab?.tokensPerSecond ?? eventTokensPerSecond
         let streaming = tab?.status == .processing || keyTape.agentStatus == .processing
+        // While a turn is running the provider's usage is usually still zero, so
+        // the live number is the streamed estimate; the reported usage takes over
+        // once the turn settles.
+        let estimated = streaming
+            ? (tab?.estimatedTokensPerSecond ?? eventEstimatedTokensPerSecond)
+            : nil
+        let rate = estimated ?? tab?.tokensPerSecond ?? eventTokensPerSecond
 
         let signature = [
             tokens.map { String($0) } ?? "-",
             window.map { String($0) } ?? "-",
             rate.map { String(format: "%.1f", $0) } ?? "-",
             streaming ? "live" : "idle",
+            estimated != nil ? "approx" : "exact",
         ].joined(separator: "|")
         guard signature != footerSignature else { return }
         footerSignature = signature
@@ -7402,6 +7585,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         footerView.contextWindow = window
         footerView.tokensPerSecond = rate
         footerView.isStreaming = streaming
+        footerView.rateIsEstimated = estimated != nil
 
         var tip = "Context usage and output token rate"
         if let tokens, let window, window > 0 {
@@ -7409,6 +7593,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
         if let rate {
             tip += " · \(String(format: "%.1f", rate)) tokens/s"
+            tip += estimated != nil ? " (estimated from streamed characters)" : " reported by the provider"
         }
         footerView.toolTip = tip
         footerView.needsDisplay = true
@@ -8444,7 +8629,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         let hiddenViews: [NSView] = [
             tabBar, statusLabel, targetLabel, terminalTitleLabel,
-            directoryPopup, modelPopup, modelRefreshButton, pidLabel, sessionIcon, sessionLabel,
+            directoryPopup, modelPopup, modelRefreshButton, thinkingPopup, pidLabel, sessionIcon, sessionLabel,
             sessionPopup, newSessionButton, headerDivider,
             responseButton, responseDivider, queryPopup, thinkingButton, responseWebView,
             responseCopyButton, responseDownloadButton, responseExpandButton,
@@ -8645,12 +8830,19 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         let pidX = width - 16 - pidWidth
         let refreshWidth: CGFloat = 30
         let refreshGap: CGFloat = 6
+        let reasoningWidth: CGFloat = Theme.thinkingPopupWidth
+        let reasoningGap: CGFloat = 8
         let available: CGFloat = max(180, pidX - 10 - contentX)
-        let directoryWidth: CGFloat = max(150, min(available * 0.46, available - 140 - 8))
-        let modelWidth: CGFloat = max(
-            120,
-            available - directoryWidth - 8 - refreshWidth - refreshGap
+        let directoryWidth: CGFloat = max(
+            150,
+            min(available * 0.46, available - 140 - 8 - reasoningWidth - reasoningGap)
         )
+        let modelNaturalWidth: CGFloat = available - directoryWidth - 8
+            - refreshWidth - refreshGap - reasoningWidth - reasoningGap
+        let modelWidth: CGFloat = max(120, modelNaturalWidth)
+        // A narrow window cannot fit the reasoning control, so it drops out instead
+        // of squeezing the model name down to a couple of characters.
+        let showReasoning = modelNaturalWidth >= 120
 
         if isSelfMode {
             directoryPopup.frame = NSRect(
@@ -8671,21 +8863,40 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
                 width: refreshWidth,
                 height: headerRowHeight - 4
             )
+            if showReasoning {
+                thinkingPopup.frame = NSRect(
+                    x: modelRefreshButton.frame.maxX + reasoningGap,
+                    y: headerRowY,
+                    width: reasoningWidth,
+                    height: headerRowHeight
+                )
+            }
             pidLabel.frame = NSRect(x: pidX, y: headerRowY + 8, width: pidWidth, height: 20)
         } else {
             targetLabel.frame = NSRect(x: contentX - 8, y: headerRowY + 10, width: 150, height: 18)
-            let titleMaxX = width - 14 - clusterWidth - 8
+            let titleX: CGFloat = contentX + 142
+            let titleMaxX = width - 14 - clusterWidth - 8 - reasoningWidth - reasoningGap
             terminalTitleLabel.frame = NSRect(
-                x: contentX + 142,
+                x: titleX,
                 y: headerRowY + 11,
-                width: max(60, titleMaxX - (contentX + 142)),
+                width: max(60, titleMaxX - titleX),
                 height: 16
             )
+            if showReasoning {
+                thinkingPopup.frame = NSRect(
+                    x: titleMaxX + reasoningGap,
+                    y: headerRowY,
+                    width: reasoningWidth,
+                    height: headerRowHeight
+                )
+            }
         }
         targetLabel.isHidden = isSelfMode || collapseHeader
         terminalTitleLabel.isHidden = isSelfMode || collapseHeader
         directoryPopup.isHidden = !isSelfMode || collapseHeader
         modelPopup.isHidden = mode != .selfHost || collapseHeader
+        thinkingPopup.isHidden = collapseHeader || !showReasoning
+            || !(mode == .selfHost || mode == .tty)
         modelRefreshButton.isHidden = mode != .selfHost || collapseHeader
         pidLabel.isHidden = mode != .selfHost || collapseHeader
         headerDivider.isHidden = !isSelfMode || collapseHeader
@@ -8909,6 +9120,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         tab.contextTokens = 60124
         tab.contextWindow = 200000
         tab.tokensPerSecond = 14.2
+        // Seed the streamed estimate too, otherwise the processing preview shows
+        // the reported rate and never exercises the `≈` path.
+        tab.estimatedTokensPerSecond = 11.3
+        tab.thinkingLevel = "high"
+        tab.thinkingLevels = ["off", "low", "medium", "high"]
         rpcTabs = [tab]
         activeRpcTabID = tab.id
         activeDirectory = tab.directory!
@@ -9004,6 +9220,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         }
         rebuildDirectoryMenu()
         rebuildModelMenu()
+        rebuildThinkingMenu()
         rebuildSessionMenu()
         rebuildQueryMenu()
         rebuildTabBar()

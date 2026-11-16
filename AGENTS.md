@@ -25,13 +25,14 @@ every number comes from, so check the mode before you write anything.
 | An RPC event or RPC response | `handleRpcEvent(_:tabID:session:)` |
 | An event from the extension | `handleIPCEvent(_:)` + the `pi.on(...)` handlers in `extension.ts` |
 | A pi RPC request | methods on `RpcSession` (`requestState()`, `requestModels()`, …) |
+| The reasoning dropdown | `rebuildThinkingMenu()` and `thinkingLevelSelected(_:)`; a tty selection goes through `injectSlashCommand(_:)` |
 | Per-tab state | `RpcTab` fields |
 | Controller-wide state | `OverlayController` properties |
 | How it is documented | `README.md` (the spec of record — mockup + Controls table) |
 
 `OverlayController` is ~6k of the 9.4k lines. Everything below its declaration is
 one class with `// MARK:` sections: Self mode sessions, Profiles, Menu bar status
-item, Tabs, Saved sessions row, Prompt history, Footer numbers, Attachments and
+item, Tabs, Saved sessions row, Prompt history, Reasoning effort, Footer numbers, Attachments and
 response actions, Slash commands, Notifications, Compact textbox mode, layout,
 Prompt box key handling.
 
@@ -49,7 +50,7 @@ It has no session object. Its only inputs are:
 
 `startIPCReader()` guards on `isatty(stdin)` so a manual launch does not swallow
 the keyboard, then dispatches each line to `handleIPCEvent`. Event names currently
-handled: `status`, `response`, `queries`, `usage`. Anything the extension knows but
+handled: `status`, `response`, `queries`, `usage`, `thinking`. Anything the extension knows but
 the overlay cannot compute must arrive as a new event — `ctx.getContextUsage()` is
 an *extension-context* API and cannot be called from the Swift side.
 
@@ -63,7 +64,7 @@ responses (`response` records whose `command` is `get_state`, `get_available_mod
 
 The rule that saves the most time: **RPC data is per tab (`RpcTab`), tty data is
 controller-wide.** Write both, or your feature works in one mode and is empty in the
-other.
+other (`RpcTab.thinkingLevel` / `eventThinkingLevel` is the current example).
 
 ## Layout: read this before touching frames
 
@@ -119,6 +120,10 @@ cheapest way to see what actually arrived.
 
 ## Gotchas that cost time
 
+- **Names already taken in the layout.** `thinkingWidth` is the response row's
+  thinking-button width and `showThinking` is tab state, so the header-row reasoning
+  control uses `reasoningWidth` / `showReasoning`. Reusing either is a redeclaration
+  error, since the whole file is one scope.
 - **`super.init()` ordering.** A computed property such as `baseMinSize` cannot be
   read before `super.init()` in `init`; use the literal or move the assignment.
 - **Access levels.** `handleIPCEvent` and the layout helpers are `private`, so a
