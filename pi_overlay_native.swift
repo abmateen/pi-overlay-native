@@ -3643,6 +3643,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     /// visible; the window background is transparent.
     private var isCompact = false
     private var compactRestoreFrame: NSRect?
+    /// Preview runs resize the window to render a PNG and must not write the
+    /// frame autosave, so the user's real window frame is kept.
+    private let isPreviewMode: Bool
     private var expandedHeight: CGFloat = 0
     private var sessionInfos: [PiSessionInfo] = []
     private var sessionLoadToken = 0
@@ -3687,6 +3690,7 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         self.injector = ttyPath.map { TtyInjector(path: $0) }
         self.appleInjector = ttyPath.map { AppleScriptInjector(ttyPath: $0) }
         self.terminalInjector = ttyPath.map { AppleScriptInjector(ttyPath: $0) }
+        self.isPreviewMode = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW"] != nil
 
         let visible = NSScreen.main?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
@@ -3727,15 +3731,14 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         // Remember the size/position the user drags out. A preview run resizes the
         // window to render a PNG, so it must not persist that geometry over the
         // user's real frame.
-        let isPreview = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW"] != nil
-        if !isPreview {
+        if !isPreviewMode {
             window.setFrameAutosaveName("PiOverlayWindow")
         }
         // One-time migration: earlier builds pinned the window 12 pt above the
         // bottom of the screen. A saved frame that is still exactly that anchor
         // means the user never moved the window, so re-centre it rather than
         // keeping the old position forever; a dragged frame is left alone.
-        if !isPreview, let screen = window.screen ?? NSScreen.main {
+        if !isPreviewMode, let screen = window.screen ?? NSScreen.main {
             let visible = screen.visibleFrame
             var frame = window.frame
             if abs(frame.minY - (visible.minY + 12)) <= 1,
@@ -4286,6 +4289,13 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         startIPCReader()
         window.makeKeyAndOrderFront(nil)
         keyTape.focusTextView()
+
+        // tty mode is a prompt for a terminal that already runs pi, so the header
+        // row and the response panel have nothing to show. Open as the capsule;
+        // ⤢ restores the full window.
+        if mode == .tty {
+            enterCompact()
+        }
     }
 
     /// Default status when no transient message is showing. Input is always
@@ -8748,6 +8758,9 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
 
         compactRestoreFrame = window.frame
         expandedHeight = window.frame.height
+        // Keep the 96 pt capsule out of the frame autosave: it is not a window
+        // shape the user wants restored on the next launch.
+        setFrameAutosave(false)
         isCompact = true
         setCompactChrome(true)
 
@@ -8797,12 +8810,23 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
             window.setFrame(frame, display: true)
         }
         compactRestoreFrame = nil
+        // Re-enable after the restore frame is in place: turning autosave back on
+        // reapplies the saved frame, which is the expanded one we just set.
+        setFrameAutosave(true)
 
         layoutViews()
         updateMinimizeButton()
         updateSendButton()
         focusOverlay()
         debugLog("compact mode off")
+    }
+
+    /// Frame autosave on/off around the capsule. Turning it off keeps the compact
+    /// geometry out of the saved frame; turning it back on reapplies that saved
+    /// (expanded) frame. Preview runs never touch the autosave at all.
+    private func setFrameAutosave(_ active: Bool) {
+        guard !isPreviewMode else { return }
+        window.setFrameAutosaveName(active ? "PiOverlayWindow" : "")
     }
 
     private static func capsuleMask(size: NSSize) -> NSImage? {
@@ -8847,7 +8871,11 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
         sendButton.isHidden = false
 
         let pidWidth: CGFloat = 84
-        compactPidLabel.stringValue = pidLabel.stringValue
+        // The capsule's identity slot is the RPC child's pid in self mode, but
+        // `pidLabel` is empty in tty mode — name the terminal it types into.
+        compactPidLabel.stringValue = mode == .tty
+            ? (ttyPath.map { "TTY " + ($0 as NSString).lastPathComponent } ?? "")
+            : pidLabel.stringValue
         compactPidLabel.frame = NSRect(
             x: sendX - 8 - pidWidth,
             y: (capsuleHeight - 18) / 2,
@@ -9327,15 +9355,19 @@ final class OverlayController: NSObject, NSWindowDelegate, WKNavigationDelegate 
     func renderPreview(to path: String) {
         let minimized = ProcessInfo.processInfo.environment["PI_OVERLAY_PREVIEW_MIN"] == "1"
         isMinimized = minimized
-        window.setFrame(
-            NSRect(
-                x: 0,
-                y: 0,
-                width: 900,
-                height: minimized ? Theme.tabStripHeight : 695
-            ),
-            display: true
-        )
+        // A tty overlay is already compact by the time the preview runs; resizing
+        // it to the full height would render the capsule inside a tall window.
+        if !isCompact {
+            window.setFrame(
+                NSRect(
+                    x: 0,
+                    y: 0,
+                    width: 900,
+                    height: minimized ? Theme.tabStripHeight : 695
+                ),
+                display: true
+            )
+        }
 
         rpcTabs = []
         let tab = makeBlankTab()

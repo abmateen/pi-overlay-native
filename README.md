@@ -40,10 +40,14 @@ the folder/model controls, with the reasoning dropdown at its right end.
 
 The **▯** button in the top-right cluster hides the whole interface except one
 capsule-shaped prompt on a transparent window: mic, text, `pi`/`ssh` pid, and
-the Send/Cancel pill. Above the capsule's right end sit an **eye** button (hide
+the Send/Cancel pill. **In tty mode the overlay opens in this mode by itself** —
+the terminal already shows the conversation, so the overlay is only the prompt.
+Above the capsule's right end sit an **eye** button (hide
 the overlay; reopen it from the menu-bar icon) and a **⤢** button that brings the
 full overlay back. A small translucent caption above the capsule names the
-profile and tab the prompt will go to (e.g. `localllm · pi-overlay-native`). The
+profile and tab the prompt will go to (e.g. `localllm · pi-overlay-native`); the
+identity slot reads the RPC child's pid, or the target terminal in tty mode
+(`TTY ttys009`). The
 capsule opens bottom-centre on the current screen, with a 28 pt gap above the
 Dock/screen edge, and returns to the previous window frame when you restore.
 Enter sends, Shift+Enter inserts a newline, Esc cancels the running turn, and
@@ -55,7 +59,8 @@ move it.
   focused, so there is no separate capture/START toggle.
 - The window is resizable: drag any edge or corner. The size is remembered
   between launches; on a fresh launch it opens at 900 × 695 pt (clamped to the
-  screen), anchored to the bottom of the visible area. Extra height goes to the
+  screen), centred on the visible area. The capsule is never saved as that frame.
+  Extra height goes to the
   Response panel while it is open; otherwise the textbox grows with the window.
 - The top-right icon cluster is **>_ diagnostics**, **▤ Response**, **👁 hide**,
   **▯ compact**, **⌄/⌃ collapse/restore** and **× close**. **⌄** shrinks the overlay to just the
@@ -129,7 +134,7 @@ move it.
 | **Speak button** 🎤 | Start/stop voice input (bottom-left inside the textbox; same as Option + V) |
 | **Arrows / click / drag** | Move the caret, place it with the mouse, or select text |
 | **Backspace** | Delete the character or selection before the caret |
-| **▯ (compact)** | Shrink the overlay to a single rounded textbox on a transparent window; the **⤢** button above it restores the full UI |
+| **▯ (compact)** | Shrink the overlay to a single rounded textbox on a transparent window; the **⤢** button above it restores the full UI. tty mode starts in this mode |
 | **⌄ / ⌃** in the top bar | Minimize the overlay to just the top bar / restore it |
 | **👁 (hide)** | Hide the window only; reopen it with **Show Overlay** from the menu-bar icon |
 | **>_ (diagnostics)** | Show the debug log, open `profiles.conf`, or open pi's agent folder |
