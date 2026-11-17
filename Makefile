@@ -7,7 +7,7 @@ NOTIFIER := PiOverlayNotifier.app
 NOTIFIER_DIR := build/$(NOTIFIER)
 LSREGISTER := /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 
-.PHONY: all clean run notifier install-notifier
+.PHONY: all clean run notifier install-notifier install-extension
 
 all: $(BIN)
 
@@ -40,6 +40,19 @@ install-notifier: $(NOTIFIER_DIR)
 clean:
 	rm -f $(BIN) $(LEGACY_BIN)
 	rm -rf build/$(NOTIFIER)
+
+# Install the pi extension as symlinks into this checkout. A copied extension
+# keeps running the binary from the day it was copied — which is how a tty
+# overlay without compact mode ended up being spawned — so link instead.
+ext_install_dir := $(HOME)/.pi/agent/extensions/tty-overlay
+
+install-extension: $(BIN)
+	mkdir -p "$(ext_install_dir)"
+	ln -sf "$(CURDIR)/extension.ts" "$(ext_install_dir)/index.ts"
+	ln -sf "$(CURDIR)/$(BIN)" "$(ext_install_dir)/$(BIN)"
+	ln -sf "$(CURDIR)/markdown-it.min.js" "$(ext_install_dir)/markdown-it.min.js"
+	rm -f "$(ext_install_dir)/tty_overlay_native" $(addprefix $(ext_install_dir)/,$(LEGACY_BIN))
+	@echo "extension installed in $(ext_install_dir) (symlinked to this checkout)"
 
 run: $(BIN)
 	./run_overlay.sh

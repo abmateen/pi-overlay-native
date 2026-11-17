@@ -331,19 +331,24 @@ Load it directly:
 pi --extension /absolute/path/to/pi-overlay-native/extension.ts
 ```
 
-Or install it as a project extension:
+Or install it as a user extension. This symlinks the extension and the binary
+into pi's extension directory, so a later `make` is picked up immediately:
 
 ```bash
-mkdir -p .pi/extensions
-cp /absolute/path/to/pi-overlay-native/extension.ts .pi/extensions/pi-overlay-native.ts
+make install-extension
 ```
 
-When installing the extension manually, copy both `pi-overlay-native` and `markdown-it.min.js` into the extension directory.
+It creates `~/.pi/agent/extensions/tty-overlay/index.ts` and
+`pi-overlay-native` as links to this checkout. Prefer it over copying: a copied
+directory keeps spawning the binary from the day it was copied, which is how a
+tty overlay ends up running without newer controls such as compact mode.
 
-If the extension is copied away from the binary, set:
+To install by hand instead, copy `pi-overlay-native` and `markdown-it.min.js`
+next to `index.ts` and re-copy the binary after every rebuild. If the extension
+lives away from the binary, point it there once:
 
 ```bash
-export PI_OVERLAY_BIN=/absolute/path/to/pi-overlay-native/pi-overlay-native
+export PI_OVERLAY_BIN=/absolute/path/to/pi-overlay-native
 ```
 
 The extension:
