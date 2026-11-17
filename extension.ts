@@ -255,12 +255,17 @@ function resetUsage(): void {
 }
 
 function killExisting(ttyPath: string): void {
-	try {
-		execFileSync("pkill", ["-f", `[t]ty_overlay_native .*--tty ${ttyPath}`], {
-			stdio: "ignore",
-		});
-	} catch {
-		// no existing process is fine
+	// Match every historical binary name, current one included: an overlay left
+	// behind by an earlier build is still the window the user sees, and it would
+	// never be replaced otherwise (one stale window per pi start, stacked).
+	for (const name of [BINARY_NAME, ...LEGACY_BINARY_NAMES]) {
+		try {
+			execFileSync("pkill", ["-f", `[${name[0]}]${name.slice(1)} .*--tty ${ttyPath}`], {
+				stdio: "ignore",
+			});
+		} catch {
+			// no existing process is fine
+		}
 	}
 }
 
